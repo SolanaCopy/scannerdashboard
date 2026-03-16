@@ -1,0 +1,12 @@
+{
+  "name": "bsc-scanner-dashboard",
+  "version": "1.0.0",
+  "description": "BSC Smart Contract Scanner Dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}

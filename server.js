@@ -1,4 +1,6 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3099;
 const SCANNER_API_KEY = process.env.SCANNER_API_KEY || 'bsc-scanner-2026-secret';
@@ -6,8 +8,24 @@ const DASH_KEY = process.env.DASH_KEY || 'Tanger2026@';
 
 app.use(express.json({ limit: '10mb' }));
 
-// === STATE ===
-let scannerResults = [];
+// === PERSISTENCE ===
+const DATA_DIR = path.join(__dirname, 'data');
+const RESULTS_FILE = path.join(DATA_DIR, 'scan_results.json');
+const EXPLOITS_FILE = path.join(DATA_DIR, 'exploit_results.json');
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function loadJSON(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return []; }
+}
+function saveJSON(file, data) {
+  try { fs.writeFileSync(file, JSON.stringify(data)); } catch (e) { console.error('Save error:', e.message); }
+}
+
+// === STATE (laden van disk) ===
+let scannerResults = loadJSON(RESULTS_FILE);
+let exploitResults = loadJSON(EXPLOITS_FILE);
+console.log(`[LOAD] ${scannerResults.length} resultaten, ${exploitResults.length} exploits geladen van disk`);
 
 // === AUTH ===
 function authDash(req, res) {
@@ -30,7 +48,31 @@ app.post('/api/scanner/results', (req, res) => {
     else scannerResults.unshift(body.result);
     if (scannerResults.length > 500) scannerResults.pop();
   }
+  saveJSON(RESULTS_FILE, scannerResults);
   return res.json({ ok: true, count: scannerResults.length });
+});
+
+// === API: Scanner pusht exploit resultaten ===
+app.post('/api/scanner/exploit', (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey !== SCANNER_API_KEY) return res.status(403).json({ error: 'Unauthorized' });
+
+  let body = req.body;
+  if (body.result) {
+    const idx = exploitResults.findIndex(r => r.address?.toLowerCase() === body.result.address?.toLowerCase());
+    if (idx >= 0) exploitResults[idx] = body.result;
+    else exploitResults.unshift(body.result);
+    if (exploitResults.length > 200) exploitResults.pop();
+
+    // Update ook scannerResults met exploit data
+    const si = scannerResults.findIndex(r => r.address?.toLowerCase() === body.result.address?.toLowerCase());
+    if (si >= 0) {
+      scannerResults[si].exploitResult = body.result;
+      saveJSON(RESULTS_FILE, scannerResults);
+    }
+  }
+  saveJSON(EXPLOITS_FILE, exploitResults);
+  return res.json({ ok: true, count: exploitResults.length });
 });
 
 // === API: Dashboard haalt resultaten ===
@@ -39,14 +81,36 @@ app.get('/api/scanner/results', (req, res) => {
   return res.json(scannerResults);
 });
 
+// === API: Dashboard haalt exploits ===
+app.get('/api/scanner/exploit', (req, res) => {
+  if (!authDash(req, res)) return;
+  return res.json(exploitResults);
+});
+
 // === API: Scanner status ===
 app.get('/api/scanner/status', (req, res) => {
   if (!authDash(req, res)) return;
   const total = scannerResults.length;
   const withHigh = scannerResults.filter(r => r.totalHigh > 0).length;
+  const exploitable = scannerResults.filter(r => r.exploitResult?.exploitable).length;
   const totalBalance = scannerResults.reduce((sum, r) => sum + (r.balanceUsd || 0), 0);
-  return res.json({ total, withHigh, totalBalance });
+  return res.json({ total, withHigh, exploitable, totalBalance });
 });
+
+// === API: Delete een resultaat ===
+app.delete('/api/scanner/results/:address', (req, res) => {
+  if (!authDash(req, res)) return;
+  const addr = req.params.address.toLowerCase();
+  const before = scannerResults.length;
+  scannerResults = scannerResults.filter(r => r.address?.toLowerCase() !== addr);
+  exploitResults = exploitResults.filter(r => r.address?.toLowerCase() !== addr);
+  saveJSON(RESULTS_FILE, scannerResults);
+  saveJSON(EXPLOITS_FILE, exploitResults);
+  return res.json({ ok: true, removed: before - scannerResults.length });
+});
+
+// === HEALTH CHECK ===
+app.get('/health', (req, res) => res.json({ status: 'ok', results: scannerResults.length, exploits: exploitResults.length }));
 
 // === DASHBOARD PAGE ===
 app.get('/', (req, res) => {
@@ -68,14 +132,20 @@ app.get('/', (req, res) => {
   .header h1 span { color: #f0b429; }
   .clock { color: #8b949e; font-size: 13px; }
 
+  .tabs { display: flex; gap: 0; padding: 0 24px; background: #0d1117; border-bottom: 1px solid #21262d; }
+  .tab { padding: 12px 20px; font-size: 13px; font-weight: 600; color: #8b949e; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: #c9d1d9; }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
   .stats-bar { display: flex; gap: 16px; padding: 16px 24px; flex-wrap: wrap; }
-  .stat-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 14px 20px; flex: 1; min-width: 150px; }
+  .stat-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 14px 20px; flex: 1; min-width: 140px; }
   .stat-card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
   .stat-card .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
   .stat-card .value.green { color: #3fb950; }
   .stat-card .value.red { color: #f85149; }
   .stat-card .value.gold { color: #f0b429; }
   .stat-card .value.blue { color: #58a6ff; }
+  .stat-card .value.purple { color: #bc8cff; }
 
   .filters { padding: 8px 24px; display: flex; gap: 8px; flex-wrap: wrap; }
   .filter-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
@@ -98,6 +168,8 @@ app.get('/', (req, res) => {
   .badge.danger { background: #f8514922; color: #f85149; border: 1px solid #f8514944; }
   .badge.warn { background: #d2992244; color: #f0b429; border: 1px solid #d2992266; }
   .badge.clean { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+  .badge.exploit { background: #bc8cff22; color: #bc8cff; border: 1px solid #bc8cff44; animation: glow 2s infinite; }
+  @keyframes glow { 0%, 100% { box-shadow: 0 0 4px #bc8cff44; } 50% { box-shadow: 0 0 12px #bc8cff66; } }
 
   .high-cell { color: #f85149; font-weight: 700; }
   .med-cell { color: #f0b429; font-weight: 600; }
@@ -109,56 +181,88 @@ app.get('/', (req, res) => {
   .refresh-bar span { font-size: 11px; color: #484f58; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3fb950; margin-right: 6px; animation: pulse 2s infinite; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .del-btn { background: none; border: 1px solid #f8514944; color: #f85149; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; opacity: 0.5; transition: all 0.2s; }
+  .del-btn:hover { opacity: 1; background: #f8514922; }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .exploit-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 16px; margin: 8px 24px; }
+  .exploit-card.exploitable { border-color: #bc8cff44; }
+  .exploit-card h3 { font-size: 14px; margin-bottom: 8px; }
+  .exploit-card .detail { font-size: 12px; color: #8b949e; margin: 4px 0; }
+  .exploit-card .detail span { color: #c9d1d9; }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>🔍 <span>BSC Scanner</span> Dashboard</h1>
+  <h1><span>BSC Scanner</span> Dashboard</h1>
   <div class="clock" id="clock"></div>
 </div>
 
-<div class="stats-bar">
-  <div class="stat-card"><div class="label">Contracten Gescand</div><div class="value blue" id="s-total">-</div></div>
-  <div class="stat-card"><div class="label">Met High Issues</div><div class="value red" id="s-high">-</div></div>
-  <div class="stat-card"><div class="label">Totale Balance</div><div class="value gold" id="s-balance">-</div></div>
-  <div class="stat-card"><div class="label">Schoon</div><div class="value green" id="s-clean">-</div></div>
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('contracts')">Contracten</div>
+  <div class="tab" onclick="switchTab('exploits')">Exploit Tests</div>
 </div>
 
-<div class="filters">
-  <button class="filter-btn active" onclick="setFilter('all')">Alle</button>
-  <button class="filter-btn" onclick="setFilter('high')">🔴 Alleen High</button>
-  <button class="filter-btn" onclick="setFilter('50k')">💰 $50k+</button>
-  <button class="filter-btn" onclick="setFilter('danger')">⚠️ Gevaarlijk</button>
+<div class="panel active" id="panel-contracts">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Gescand</div><div class="value blue" id="s-total">-</div></div>
+    <div class="stat-card"><div class="label">High Issues</div><div class="value red" id="s-high">-</div></div>
+    <div class="stat-card"><div class="label">Exploitable</div><div class="value purple" id="s-exploit">-</div></div>
+    <div class="stat-card"><div class="label">Totale Balance</div><div class="value gold" id="s-balance">-</div></div>
+    <div class="stat-card"><div class="label">Schoon</div><div class="value green" id="s-clean">-</div></div>
+  </div>
+
+  <div class="filters">
+    <button class="filter-btn active" onclick="setFilter('all')">Alle</button>
+    <button class="filter-btn" onclick="setFilter('high')">Alleen High</button>
+    <button class="filter-btn" onclick="setFilter('50k')">$50k+</button>
+    <button class="filter-btn" onclick="setFilter('danger')">Gevaarlijk</button>
+    <button class="filter-btn" onclick="setFilter('exploitable')">Exploitable</button>
+  </div>
+
+  <div class="refresh-bar">
+    <span><span class="dot"></span>Auto-refresh elke 30s</span>
+    <span id="last-update">Laden...</span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th onclick="sortBy('time')">Datum <span class="sort-arrow" id="sort-time"></span></th>
+          <th onclick="sortBy('contractName')">Naam <span class="sort-arrow" id="sort-contractName"></span></th>
+          <th onclick="sortBy('address')">Contract <span class="sort-arrow" id="sort-address"></span></th>
+          <th onclick="sortBy('balanceUsd')">Balance <span class="sort-arrow" id="sort-balanceUsd"></span></th>
+          <th onclick="sortBy('totalHigh')">High <span class="sort-arrow" id="sort-totalHigh"></span></th>
+          <th onclick="sortBy('totalMedium')">Medium <span class="sort-arrow" id="sort-totalMedium"></span></th>
+          <th onclick="sortBy('verdict')">Verdict <span class="sort-arrow" id="sort-verdict"></span></th>
+          <th>Actie</th>
+        </tr>
+      </thead>
+      <tbody id="results-body">
+        <tr><td colspan="8" class="empty">Laden...</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<div class="refresh-bar">
-  <span><span class="dot"></span>Auto-refresh elke 60s</span>
-  <span id="last-update">Laden...</span>
-</div>
-
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th onclick="sortBy('time')">Datum <span class="sort-arrow" id="sort-time"></span></th>
-        <th onclick="sortBy('contractName')">Naam <span class="sort-arrow" id="sort-contractName"></span></th>
-        <th onclick="sortBy('address')">Contract <span class="sort-arrow" id="sort-address"></span></th>
-        <th onclick="sortBy('balanceUsd')">Balance <span class="sort-arrow" id="sort-balanceUsd"></span></th>
-        <th onclick="sortBy('totalHigh')">🔴 High <span class="sort-arrow" id="sort-totalHigh"></span></th>
-        <th onclick="sortBy('totalMedium')">🟡 Medium <span class="sort-arrow" id="sort-totalMedium"></span></th>
-        <th onclick="sortBy('verdict')">Verdict <span class="sort-arrow" id="sort-verdict"></span></th>
-      </tr>
-    </thead>
-    <tbody id="results-body">
-      <tr><td colspan="7" class="empty">Laden...</td></tr>
-    </tbody>
-  </table>
+<div class="panel" id="panel-exploits">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Totaal Getest</div><div class="value blue" id="se-total">-</div></div>
+    <div class="stat-card"><div class="label">Exploitable</div><div class="value purple" id="se-exploit">-</div></div>
+    <div class="stat-card"><div class="label">Niet Exploitable</div><div class="value green" id="se-safe">-</div></div>
+  </div>
+  <div id="exploits-list"></div>
 </div>
 
 <script>
 const KEY = '${key}';
 let data = [];
+let exploits = [];
 let currentSort = 'totalHigh';
 let sortDir = -1;
 let currentFilter = 'all';
@@ -168,9 +272,17 @@ function fmtBalance(v) { return v >= 1000000 ? '$' + (v/1000000).toFixed(1) + 'M
 function fmtDate(t) { if (!t) return '-'; const d = new Date(t); return d.toLocaleDateString('nl-NL',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('nl-NL',{hour:'2-digit',minute:'2-digit'}); }
 
 function getVerdict(r) {
+  if (r.exploitResult?.exploitable) return { text: 'EXPLOITABLE', cls: 'exploit', score: 4 };
   if (r.totalHigh >= 3) return { text: 'GEVAARLIJK', cls: 'danger', score: 3 };
   if (r.totalHigh >= 1) return { text: 'VERDACHT', cls: 'warn', score: 2 };
   return { text: 'SCHOON', cls: 'clean', score: 1 };
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('panel-' + tab).classList.add('active');
 }
 
 function setFilter(f) {
@@ -186,12 +298,18 @@ function sortBy(col) {
   render();
 }
 
+async function deleteResult(addr) {
+  if (!confirm('Verwijder dit contract?')) return;
+  await fetch('/api/scanner/results/' + addr + '?key=' + KEY, { method: 'DELETE' });
+  await fetchData();
+}
+
 function render() {
   let filtered = [...data];
-
   if (currentFilter === 'high') filtered = filtered.filter(r => r.totalHigh > 0);
   else if (currentFilter === '50k') filtered = filtered.filter(r => r.balanceUsd >= 50000);
   else if (currentFilter === 'danger') filtered = filtered.filter(r => r.totalHigh >= 3);
+  else if (currentFilter === 'exploitable') filtered = filtered.filter(r => r.exploitResult?.exploitable);
 
   filtered.sort((a, b) => {
     let va, vb;
@@ -202,20 +320,19 @@ function render() {
     return sortDir * (va - vb);
   });
 
-  // Update sort arrows
   document.querySelectorAll('.sort-arrow').forEach(s => s.textContent = '');
   const arrow = document.getElementById('sort-' + currentSort);
   if (arrow) arrow.textContent = sortDir === -1 ? '▼' : '▲';
 
-  // Update stats
   document.getElementById('s-total').textContent = data.length;
   document.getElementById('s-high').textContent = data.filter(r => r.totalHigh > 0).length;
+  document.getElementById('s-exploit').textContent = data.filter(r => r.exploitResult?.exploitable).length;
   document.getElementById('s-balance').textContent = fmtBalance(data.reduce((s, r) => s + (r.balanceUsd || 0), 0));
-  document.getElementById('s-clean').textContent = data.filter(r => r.totalHigh === 0).length;
+  document.getElementById('s-clean').textContent = data.filter(r => !r.totalHigh).length;
 
   const tbody = document.getElementById('results-body');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">Geen resultaten' + (currentFilter !== 'all' ? ' (filter actief)' : '') + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">Geen resultaten' + (currentFilter !== 'all' ? ' (filter actief)' : '') + '</td></tr>';
     return;
   }
 
@@ -229,15 +346,42 @@ function render() {
       '<td class="high-cell">' + (r.totalHigh || 0) + '</td>' +
       '<td class="med-cell">' + (r.totalMedium || 0) + '</td>' +
       '<td><span class="badge ' + v.cls + '">' + v.text + '</span></td>' +
+      '<td><button class="del-btn" onclick="deleteResult(\\''+r.address+'\\')">X</button></td>' +
       '</tr>';
+  }).join('');
+}
+
+function renderExploits() {
+  document.getElementById('se-total').textContent = exploits.length;
+  document.getElementById('se-exploit').textContent = exploits.filter(e => e.exploitable).length;
+  document.getElementById('se-safe').textContent = exploits.filter(e => !e.exploitable).length;
+
+  const list = document.getElementById('exploits-list');
+  if (exploits.length === 0) {
+    list.innerHTML = '<div class="empty">Geen exploit tests</div>';
+    return;
+  }
+  list.innerHTML = exploits.slice(0, 50).map(e => {
+    return '<div class="exploit-card ' + (e.exploitable ? 'exploitable' : '') + '">' +
+      '<h3><span class="badge ' + (e.exploitable ? 'exploit' : 'clean') + '">' + (e.exploitable ? 'EXPLOITABLE' : 'VEILIG') + '</span> ' + (e.contractName || shortAddr(e.address)) + '</h3>' +
+      '<div class="detail">Adres: <span><a href="https://bscscan.com/address/' + e.address + '" target="_blank" style="color:#58a6ff">' + (e.address || '-') + '</a></span></div>' +
+      '<div class="detail">Getest: <span>' + fmtDate(e.time) + '</span></div>' +
+      (e.method ? '<div class="detail">Methode: <span>' + e.method + '</span></div>' : '') +
+      (e.details ? '<div class="detail">Details: <span>' + e.details + '</span></div>' : '') +
+      '</div>';
   }).join('');
 }
 
 async function fetchData() {
   try {
-    const res = await fetch('/api/scanner/results?key=' + KEY);
-    data = await res.json();
+    const [resR, resE] = await Promise.all([
+      fetch('/api/scanner/results?key=' + KEY),
+      fetch('/api/scanner/exploit?key=' + KEY)
+    ]);
+    data = await resR.json();
+    exploits = await resE.json();
     render();
+    renderExploits();
     document.getElementById('last-update').textContent = 'Laatste update: ' + new Date().toLocaleTimeString('nl-NL');
   } catch (e) {
     document.getElementById('last-update').textContent = 'Fout bij laden';
@@ -249,7 +393,7 @@ function updateClock() {
 }
 
 fetchData();
-setInterval(fetchData, 60000);
+setInterval(fetchData, 30000);
 setInterval(updateClock, 1000);
 updateClock();
 </script>
@@ -257,7 +401,11 @@ updateClock();
 </html>`);
 });
 
+// === ROOT HEALTH (zonder auth) ===
+app.get('/ping', (req, res) => res.send('ok'));
+
 // === START ===
 app.listen(PORT, () => {
   console.log('BSC Scanner Dashboard draait op port ' + PORT);
+  console.log('Resultaten: ' + scannerResults.length + ', Exploits: ' + exploitResults.length);
 });

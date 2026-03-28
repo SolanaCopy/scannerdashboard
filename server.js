@@ -12,6 +12,7 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = path.join(__dirname, 'data');
 const RESULTS_FILE = path.join(DATA_DIR, 'scan_results.json');
 const EXPLOITS_FILE = path.join(DATA_DIR, 'exploit_results.json');
+const ECHIDNA_FILE = path.join(DATA_DIR, 'echidna_results.json');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -25,7 +26,8 @@ function saveJSON(file, data) {
 // === STATE (laden van disk) ===
 let scannerResults = loadJSON(RESULTS_FILE);
 let exploitResults = loadJSON(EXPLOITS_FILE);
-console.log(`[LOAD] ${scannerResults.length} resultaten, ${exploitResults.length} exploits geladen van disk`);
+let echidnaResults = loadJSON(ECHIDNA_FILE);
+console.log(`[LOAD] ${scannerResults.length} resultaten, ${exploitResults.length} exploits, ${echidnaResults.length} echidna geladen van disk`);
 
 // === AUTH ===
 function authDash(req, res) {
@@ -75,6 +77,29 @@ app.post('/api/scanner/exploit', (req, res) => {
   return res.json({ ok: true, count: exploitResults.length });
 });
 
+// === API: Scanner pusht echidna resultaten ===
+app.post('/api/scanner/echidna', (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey !== SCANNER_API_KEY) return res.status(403).json({ error: 'Unauthorized' });
+
+  let body = req.body;
+  if (body.result) {
+    const idx = echidnaResults.findIndex(r => r.address?.toLowerCase() === body.result.address?.toLowerCase());
+    if (idx >= 0) echidnaResults[idx] = body.result;
+    else echidnaResults.unshift(body.result);
+    if (echidnaResults.length > 200) echidnaResults.pop();
+
+    // Update ook scannerResults met echidna data
+    const si = scannerResults.findIndex(r => r.address?.toLowerCase() === body.result.address?.toLowerCase());
+    if (si >= 0) {
+      scannerResults[si].echidna = body.result;
+      saveJSON(RESULTS_FILE, scannerResults);
+    }
+  }
+  saveJSON(ECHIDNA_FILE, echidnaResults);
+  return res.json({ ok: true, count: echidnaResults.length });
+});
+
 // === API: Dashboard haalt resultaten ===
 app.get('/api/scanner/results', (req, res) => {
   if (!authDash(req, res)) return;
@@ -85,6 +110,12 @@ app.get('/api/scanner/results', (req, res) => {
 app.get('/api/scanner/exploit', (req, res) => {
   if (!authDash(req, res)) return;
   return res.json(exploitResults);
+});
+
+// === API: Dashboard haalt echidna ===
+app.get('/api/scanner/echidna', (req, res) => {
+  if (!authDash(req, res)) return;
+  return res.json(echidnaResults);
 });
 
 // === API: Scanner status ===
@@ -205,6 +236,7 @@ app.get('/', (req, res) => {
 <div class="tabs">
   <div class="tab active" onclick="switchTab('contracts')">Contracten</div>
   <div class="tab" onclick="switchTab('exploits')">Exploit Tests</div>
+  <div class="tab" onclick="switchTab('echidna')">Echidna Fuzzing</div>
 </div>
 
 <div class="panel active" id="panel-contracts">
@@ -259,10 +291,37 @@ app.get('/', (req, res) => {
   <div id="exploits-list"></div>
 </div>
 
+<div class="panel" id="panel-echidna">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Totaal Gefuzzed</div><div class="value blue" id="sf-total">-</div></div>
+    <div class="stat-card"><div class="label">Failures Gevonden</div><div class="value red" id="sf-failed">-</div></div>
+    <div class="stat-card"><div class="label">Alle Tests Passed</div><div class="value green" id="sf-clean">-</div></div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Datum</th>
+          <th>Contract</th>
+          <th>Adres</th>
+          <th>Passed</th>
+          <th>Failed</th>
+          <th>Status</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody id="echidna-body">
+        <tr><td colspan="7" class="empty">Geen echidna resultaten</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 const KEY = '${key}';
 let data = [];
 let exploits = [];
+let echidnaData = [];
 let currentSort = 'totalHigh';
 let sortDir = -1;
 let currentFilter = 'all';
@@ -372,16 +431,52 @@ function renderExploits() {
   }).join('');
 }
 
+function renderEchidna() {
+  const total = echidnaData.length;
+  const withFails = echidnaData.filter(e => e.failed > 0).length;
+  const clean = echidnaData.filter(e => e.failed === 0 && e.passed > 0).length;
+
+  document.getElementById('sf-total').textContent = total;
+  document.getElementById('sf-failed').textContent = withFails;
+  document.getElementById('sf-clean').textContent = clean;
+
+  const tbody = document.getElementById('echidna-body');
+  if (total === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Geen echidna resultaten</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = echidnaData.slice(0, 100).map(e => {
+    const hasFails = e.failed > 0;
+    const statusBadge = hasFails
+      ? '<span class="badge danger">FAILURES</span>'
+      : (e.passed > 0 ? '<span class="badge clean">PASSED</span>' : '<span class="badge warn">GEEN DATA</span>');
+    const details = (e.issues || []).slice(0, 3).map(i => i.detail || i.type).join(', ');
+    return '<tr>' +
+      '<td>' + fmtDate(e.time) + '</td>' +
+      '<td>' + (e.contractName || '-') + '</td>' +
+      '<td class="addr"><a href="https://bscscan.com/address/' + e.address + '" target="_blank">' + shortAddr(e.address) + '</a></td>' +
+      '<td style="color:#3fb950;font-weight:600">' + (e.passed || 0) + '</td>' +
+      '<td class="high-cell">' + (e.failed || 0) + '</td>' +
+      '<td>' + statusBadge + '</td>' +
+      '<td style="font-size:11px;color:#8b949e;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (details || '-') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 async function fetchData() {
   try {
-    const [resR, resE] = await Promise.all([
+    const [resR, resE, resF] = await Promise.all([
       fetch('/api/scanner/results?key=' + KEY),
-      fetch('/api/scanner/exploit?key=' + KEY)
+      fetch('/api/scanner/exploit?key=' + KEY),
+      fetch('/api/scanner/echidna?key=' + KEY)
     ]);
     data = await resR.json();
     exploits = await resE.json();
+    echidnaData = await resF.json();
     render();
     renderExploits();
+    renderEchidna();
     document.getElementById('last-update').textContent = 'Laatste update: ' + new Date().toLocaleTimeString('nl-NL');
   } catch (e) {
     document.getElementById('last-update').textContent = 'Fout bij laden';

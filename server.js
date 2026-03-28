@@ -235,8 +235,10 @@ app.get('/', (req, res) => {
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('contracts')">Contracten</div>
+  <div class="tab" onclick="switchTab('slither')">Slither</div>
+  <div class="tab" onclick="switchTab('mythril')">Mythril</div>
+  <div class="tab" onclick="switchTab('echidna')">Echidna</div>
   <div class="tab" onclick="switchTab('exploits')">Exploit Tests</div>
-  <div class="tab" onclick="switchTab('echidna')">Echidna Fuzzing</div>
 </div>
 
 <div class="panel active" id="panel-contracts">
@@ -277,6 +279,58 @@ app.get('/', (req, res) => {
       </thead>
       <tbody id="results-body">
         <tr><td colspan="8" class="empty">Laden...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" id="panel-slither">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Geanalyseerd</div><div class="value blue" id="sl-total">-</div></div>
+    <div class="stat-card"><div class="label">High Findings</div><div class="value red" id="sl-high">-</div></div>
+    <div class="stat-card"><div class="label">Medium Findings</div><div class="value gold" id="sl-med">-</div></div>
+    <div class="stat-card"><div class="label">Schoon</div><div class="value green" id="sl-clean">-</div></div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Datum</th>
+          <th>Contract</th>
+          <th>Adres</th>
+          <th>High</th>
+          <th>Medium</th>
+          <th>Top Findings</th>
+        </tr>
+      </thead>
+      <tbody id="slither-body">
+        <tr><td colspan="6" class="empty">Laden...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" id="panel-mythril">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Geanalyseerd</div><div class="value blue" id="my-total">-</div></div>
+    <div class="stat-card"><div class="label">High Issues</div><div class="value red" id="my-high">-</div></div>
+    <div class="stat-card"><div class="label">Medium Issues</div><div class="value gold" id="my-med">-</div></div>
+    <div class="stat-card"><div class="label">Schoon</div><div class="value green" id="my-clean">-</div></div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Datum</th>
+          <th>Contract</th>
+          <th>Adres</th>
+          <th>High</th>
+          <th>Medium</th>
+          <th>Top Issues</th>
+        </tr>
+      </thead>
+      <tbody id="mythril-body">
+        <tr><td colspan="6" class="empty">Laden...</td></tr>
       </tbody>
     </table>
   </div>
@@ -410,6 +464,75 @@ function render() {
   }).join('');
 }
 
+function renderSlither() {
+  const withSlither = data.filter(r => r.slither?.success);
+  const totalHigh = withSlither.reduce((s, r) => s + (r.slither?.high || 0), 0);
+  const totalMed = withSlither.reduce((s, r) => s + (r.slither?.medium || 0), 0);
+  const clean = withSlither.filter(r => !r.slither?.high && !r.slither?.medium).length;
+
+  document.getElementById('sl-total').textContent = withSlither.length;
+  document.getElementById('sl-high').textContent = totalHigh;
+  document.getElementById('sl-med').textContent = totalMed;
+  document.getElementById('sl-clean').textContent = clean;
+
+  const tbody = document.getElementById('slither-body');
+  if (withSlither.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Geen slither resultaten</td></tr>';
+    return;
+  }
+
+  const sorted = [...withSlither].sort((a, b) => (b.slither?.high || 0) - (a.slither?.high || 0));
+  tbody.innerHTML = sorted.map(r => {
+    const findings = (r.slither?.findings || []).slice(0, 3).map(f => {
+      const icon = f.impact === 'High' ? '<span style="color:#f85149">H</span>' : '<span style="color:#f0b429">M</span>';
+      return icon + ' ' + (f.check || f.description || '').substring(0, 40);
+    }).join('<br>');
+    return '<tr>' +
+      '<td>' + fmtDate(r.time) + '</td>' +
+      '<td>' + (r.contractName || '-') + '</td>' +
+      '<td class="addr"><a href="https://bscscan.com/address/' + r.address + '" target="_blank">' + shortAddr(r.address) + '</a></td>' +
+      '<td class="high-cell">' + (r.slither?.high || 0) + '</td>' +
+      '<td class="med-cell">' + (r.slither?.medium || 0) + '</td>' +
+      '<td style="font-size:11px;line-height:1.6">' + (findings || '<span style="color:#3fb950">Schoon</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function renderMythril() {
+  const withMythril = data.filter(r => r.mythril?.success);
+  const totalHigh = withMythril.reduce((s, r) => s + (r.mythril?.high || 0), 0);
+  const totalMed = withMythril.reduce((s, r) => s + (r.mythril?.medium || 0), 0);
+  const clean = withMythril.filter(r => !r.mythril?.high && !r.mythril?.medium).length;
+
+  document.getElementById('my-total').textContent = withMythril.length;
+  document.getElementById('my-high').textContent = totalHigh;
+  document.getElementById('my-med').textContent = totalMed;
+  document.getElementById('my-clean').textContent = clean;
+
+  const tbody = document.getElementById('mythril-body');
+  if (withMythril.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Geen mythril resultaten</td></tr>';
+    return;
+  }
+
+  const sorted = [...withMythril].sort((a, b) => (b.mythril?.high || 0) - (a.mythril?.high || 0));
+  tbody.innerHTML = sorted.map(r => {
+    const issues = (r.mythril?.issues || []).slice(0, 3).map(i => {
+      const icon = i.severity === 'High' ? '<span style="color:#f85149">H</span>' : '<span style="color:#f0b429">M</span>';
+      const swc = i.swcId ? ' (SWC-' + i.swcId + ')' : '';
+      return icon + ' ' + (i.title || '').substring(0, 40) + swc;
+    }).join('<br>');
+    return '<tr>' +
+      '<td>' + fmtDate(r.time) + '</td>' +
+      '<td>' + (r.contractName || '-') + '</td>' +
+      '<td class="addr"><a href="https://bscscan.com/address/' + r.address + '" target="_blank">' + shortAddr(r.address) + '</a></td>' +
+      '<td class="high-cell">' + (r.mythril?.high || 0) + '</td>' +
+      '<td class="med-cell">' + (r.mythril?.medium || 0) + '</td>' +
+      '<td style="font-size:11px;line-height:1.6">' + (issues || '<span style="color:#3fb950">Schoon</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 function renderExploits() {
   document.getElementById('se-total').textContent = exploits.length;
   document.getElementById('se-exploit').textContent = exploits.filter(e => e.exploitable).length;
@@ -475,6 +598,8 @@ async function fetchData() {
     exploits = await resE.json();
     echidnaData = await resF.json();
     render();
+    renderSlither();
+    renderMythril();
     renderExploits();
     renderEchidna();
     document.getElementById('last-update').textContent = 'Laatste update: ' + new Date().toLocaleTimeString('nl-NL');

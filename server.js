@@ -224,6 +224,29 @@ app.get('/', (req, res) => {
   .exploit-card h3 { font-size: 14px; margin-bottom: 8px; }
   .exploit-card .detail { font-size: 12px; color: #8b949e; margin: 4px 0; }
   .exploit-card .detail span { color: #c9d1d9; }
+
+  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 1000; overflow-y: auto; padding: 40px 20px; }
+  .modal-overlay.active { display: flex; justify-content: center; align-items: flex-start; }
+  .modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px; max-width: 800px; width: 100%; padding: 24px; position: relative; }
+  .modal-close { position: absolute; top: 12px; right: 16px; background: none; border: none; color: #8b949e; font-size: 20px; cursor: pointer; }
+  .modal-close:hover { color: #f85149; }
+  .modal h2 { font-size: 16px; margin-bottom: 4px; }
+  .modal .modal-addr { font-family: 'Courier New', monospace; font-size: 12px; color: #58a6ff; margin-bottom: 16px; }
+  .modal .modal-addr a { color: #58a6ff; text-decoration: none; }
+  .modal .modal-addr a:hover { text-decoration: underline; }
+  .modal-meta { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .modal-meta .mm { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 14px; font-size: 12px; }
+  .modal-meta .mm .ml { color: #8b949e; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .modal-meta .mm .mv { font-weight: 700; margin-top: 2px; }
+  .modal-section { margin-bottom: 16px; }
+  .modal-section h3 { font-size: 13px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #21262d; }
+  .finding-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px solid #161b2288; font-size: 12px; }
+  .finding-row .f-sev { flex-shrink: 0; width: 18px; text-align: center; }
+  .finding-row .f-name { color: #c9d1d9; font-weight: 600; min-width: 120px; }
+  .finding-row .f-desc { color: #8b949e; flex: 1; }
+  .no-findings { color: #3fb950; font-size: 12px; padding: 8px 0; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: #1c2333; }
 </style>
 </head>
 <body>
@@ -451,15 +474,15 @@ function render() {
 
   tbody.innerHTML = filtered.map(r => {
     const v = getVerdict(r);
-    return '<tr>' +
+    return '<tr class="clickable" onclick="showDetail(\\''+r.address+'\\')">' +
       '<td>' + fmtDate(r.time) + '</td>' +
       '<td>' + (r.contractName || '-') + '</td>' +
-      '<td class="addr"><a href="https://bscscan.com/address/' + r.address + '" target="_blank">' + shortAddr(r.address) + '</a></td>' +
+      '<td class="addr">' + shortAddr(r.address) + '</td>' +
       '<td class="balance">' + fmtBalance(r.balanceUsd) + '</td>' +
       '<td class="high-cell">' + (r.totalHigh || 0) + '</td>' +
       '<td class="med-cell">' + (r.totalMedium || 0) + '</td>' +
       '<td><span class="badge ' + v.cls + '">' + v.text + '</span></td>' +
-      '<td><button class="del-btn" onclick="deleteResult(\\''+r.address+'\\')">X</button></td>' +
+      '<td><button class="del-btn" onclick="event.stopPropagation();deleteResult(\\''+r.address+'\\')">X</button></td>' +
       '</tr>';
   }).join('');
 }
@@ -616,7 +639,97 @@ fetchData();
 setInterval(fetchData, 30000);
 setInterval(updateClock, 1000);
 updateClock();
+
+function showDetail(addr) {
+  const r = data.find(d => d.address === addr);
+  if (!r) return;
+  const v = getVerdict(r);
+  const m = document.getElementById('modal-content');
+
+  let html = '<h2>' + (r.contractName || 'Onbekend') + ' <span class="badge ' + v.cls + '">' + v.text + '</span></h2>';
+  html += '<div class="modal-addr"><a href="https://bscscan.com/address/' + r.address + '" target="_blank">' + r.address + '</a></div>';
+
+  html += '<div class="modal-meta">';
+  html += '<div class="mm"><div class="ml">Balance</div><div class="mv" style="color:#3fb950">' + fmtBalance(r.balanceUsd) + '</div></div>';
+  html += '<div class="mm"><div class="ml">High</div><div class="mv" style="color:#f85149">' + (r.totalHigh || 0) + '</div></div>';
+  html += '<div class="mm"><div class="ml">Medium</div><div class="mv" style="color:#f0b429">' + (r.totalMedium || 0) + '</div></div>';
+  html += '<div class="mm"><div class="ml">Datum</div><div class="mv">' + fmtDate(r.time) + '</div></div>';
+  html += '</div>';
+
+  // Slither
+  html += '<div class="modal-section"><h3>Slither (Statische Analyse)</h3>';
+  if (r.slither?.success && r.slither.findings?.length > 0) {
+    r.slither.findings.forEach(f => {
+      const icon = f.impact === 'High' ? '<span style="color:#f85149">H</span>' : '<span style="color:#f0b429">M</span>';
+      html += '<div class="finding-row"><div class="f-sev">' + icon + '</div><div class="f-name">' + (f.check || '-') + '</div><div class="f-desc">' + (f.description || '').substring(0, 300) + '</div></div>';
+    });
+  } else if (r.slither?.success) {
+    html += '<div class="no-findings">Geen high/medium findings</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  // Mythril
+  html += '<div class="modal-section"><h3>Mythril (Symbolische Executie)</h3>';
+  if (r.mythril?.success && r.mythril.issues?.length > 0) {
+    r.mythril.issues.forEach(i => {
+      const icon = i.severity === 'High' ? '<span style="color:#f85149">H</span>' : '<span style="color:#f0b429">M</span>';
+      const swc = i.swcId ? ' (SWC-' + i.swcId + ')' : '';
+      html += '<div class="finding-row"><div class="f-sev">' + icon + '</div><div class="f-name">' + (i.title || '-') + swc + '</div><div class="f-desc">' + (i.function || '') + '</div></div>';
+    });
+  } else if (r.mythril?.success) {
+    html += '<div class="no-findings">Geen high/medium issues</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  // Security
+  html += '<div class="modal-section"><h3>Security Check (On-Chain)</h3>';
+  if (r.security?.success && r.security.findings?.length > 0) {
+    r.security.findings.forEach(f => {
+      const color = f.severity === 'HIGH' ? '#f85149' : f.severity === 'MEDIUM' ? '#f0b429' : '#8b949e';
+      html += '<div class="finding-row"><div class="f-sev"><span style="color:' + color + '">' + (f.severity || '?')[0] + '</span></div><div class="f-name">' + (f.check || '-') + '</div><div class="f-desc">' + (f.detail || '') + '</div></div>';
+    });
+  } else if (r.security?.success) {
+    html += '<div class="no-findings">Geen issues gevonden</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  // Echidna
+  html += '<div class="modal-section"><h3>Echidna (Fuzzing)</h3>';
+  if (r.echidna?.success !== undefined && r.echidna?.passed !== undefined) {
+    html += '<div style="font-size:12px;margin-bottom:6px">Passed: <span style="color:#3fb950;font-weight:600">' + (r.echidna.passed || 0) + '</span> | Failed: <span style="color:#f85149;font-weight:600">' + (r.echidna.failed || 0) + '</span></div>';
+    if (r.echidna.issues?.length > 0) {
+      r.echidna.issues.forEach(i => {
+        html += '<div class="finding-row"><div class="f-sev"><span style="color:#f85149">!</span></div><div class="f-name">' + (i.type || '-') + '</div><div class="f-desc">' + (i.detail || '').substring(0, 300) + '</div></div>';
+      });
+    }
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  m.innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 </script>
+
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">X</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
 </body>
 </html>`);
 });

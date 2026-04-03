@@ -477,51 +477,47 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
 
     const trimmedSource = source.length > 30000 ? source.substring(0, 30000) + '\n// ... [TRUNCATED]' : source;
 
-    const prompt = 'Je bent een elite smart contract security auditor (bug bounty hunter). Analyseer dit BSC contract en genereer een exploit script.\n\n' +
+    const prompt = 'Je bent een hacker die probeert geld te stelen uit een smart contract. Je bent GEEN eigenaar/owner/admin. Je bent een willekeurige gebruiker met alleen een wallet en onbeperkt startkapitaal (flash loans). Antwoord in het Nederlands.\n\n' +
+      'DOEL: Kun jij als NIET-eigenaar tokens of BNB uit dit contract halen? Zo ja, schrijf een werkend exploit script.\n\n' +
       'CONTRACT INFO:\n' +
       '- Adres: ' + address + '\n' +
       '- Chain: BSC (chainId 56)\n' +
-      '- Owner/Admin: ' + (onChainInfo.owner || 'GEEN owner() functie gevonden — probeer NIET owner() aan te roepen') + '\n' +
+      '- Owner/Admin: ' + (onChainInfo.owner || 'ONBEKEND') + ' (jij bent dit NIET, je mag NIET als owner impersonaten)\n' +
       '- Token balansen in contract: ' + balanceStr + '\n' +
       '- Contract state: ' + stateStr + '\n' +
       (onChainInfo.state.proxyImpl ? '- PROXY contract → implementatie: ' + onChainInfo.state.proxyImpl + '\n' : '') +
-      '\nABI (beschikbare functies):\n' + abiSummary + '\n\n' +
+      '\nABI (functies die je kunt aanroepen):\n' + abiSummary + '\n\n' +
       'SOURCE CODE:\n```solidity\n' + trimmedSource + '\n```\n\n' +
-      'OPDRACHT:\nZoek naar BUSINESS LOGIC BUGS:\n' +
-      '1. Rekenfouten (afrondingsbugs, verkeerde fee/reward berekening, overflow bij vermenigvuldiging)\n' +
-      '2. Flash loan aanvallen (spot price als oracle, manipuleerbare reserves)\n' +
-      '3. Dubbel claimen, timing exploits, verkeerde bookkeeping\n' +
-      '4. Cross-function reentrancy of state inconsistencies\n' +
-      '5. Eerste depositor / donation attacks\n' +
-      '6. Access control gaps (subtiel, niet simpel "missing onlyOwner")\n\n' +
-      'BELANGRIJK:\n' +
+      'AANVAL PLAN:\n' +
+      '1. Zoek functies die IEDEREEN kan aanroepen (geen onlyOwner/onlyAdmin modifier)\n' +
+      '2. Kan je via die functies tokens uit het contract halen?\n' +
+      '3. Kun je via flash loans prijzen manipuleren en zo winst maken?\n' +
+      '4. Zijn er rekenfouten waardoor je meer terugkrijgt dan je stort?\n' +
+      '5. Kun je dubbel claimen, of state manipuleren zodat je geld vrijspeelt?\n' +
+      '6. Is er reentrancy mogelijk zonder guard?\n\n' +
+      'REGELS:\n' +
+      '- Je mag NIET impersonaten als owner/admin — je bent een random adres\n' +
+      '- Je MAG wel flash loans gebruiken (onbeperkt kapitaal)\n' +
       '- Roep ALLEEN functies aan die in de ABI staan\n' +
-      '- Als er geen owner() is, gebruik die NIET\n' +
-      '- Check de token balansen hierboven — als een token 0 is, probeer die niet te draineren\n' +
-      '- De exploit draait op een Anvil BSC fork, NIET op Hardhat\n\n' +
-      'Het script krijgt automatisch deze variabelen en helpers:\n' +
-      '- `provider` — ethers.js v6 JsonRpcProvider op Anvil fork (http://127.0.0.1:' + anvilPort + ')\n' +
-      '- `TARGET` — contract adres ("' + address + '")\n' +
-      '- `ethers` — ethers.js v6 library (al geïmporteerd)\n' +
-      '- `impersonate(addr)` — retourneert een signer die als dat adres kan transacten\n' +
-      '- `setBalance(addr, ethAmount)` — zet BNB balance (string in ETH)\n' +
-      '- `fund(addr)` — geeft 1000 BNB\n\n' +
-      'Voor impersonation gebruik:\n' +
-      '  await provider.send(\'anvil_impersonateAccount\', [addr]);\n' +
-      '  const signer = new ethers.Wallet(\'0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\', provider);\n' +
-      '  // OF voor send-as: provider.send(\'eth_sendTransaction\', [{from: addr, to: ..., data: ...}])\n\n' +
-      'Gebruik console.log() om elke stap + balans veranderingen te loggen.\n\n' +
-      'Antwoord in EXACT dit JSON format (geen markdown, puur JSON):\n' +
-      '{\n  "analysis": "korte uitleg van gevonden bugs (max 5 bullets, elke bullet op nieuwe regel)",\n' +
-      '  "exploitable": true/false,\n  "confidence": "HIGH/MEDIUM/LOW",\n' +
-      '  "exploit_code": "// alleen de body van main(), GEEN imports/wrapping, GEEN async function main() wrapper"\n}\n\n' +
-      'KRITIEK: Als exploitable=true, dan MOET exploit_code een werkend JavaScript script bevatten. exploit_code mag ALLEEN null zijn als exploitable=false.\n' +
-      'Het exploit script moet:\n' +
-      '- Eerst balansen loggen (voor)\n' +
-      '- De exploit uitvoeren\n' +
-      '- Balansen opnieuw loggen (na)\n' +
-      '- Duidelijk tonen of er winst is gemaakt\n\n' +
-      'Als er GEEN business logic bugs zijn: {"analysis":"Geen exploiteerbare bugs gevonden","exploitable":false,"confidence":"HIGH","exploit_code":null}';
+      '- Als een token balance 0 is, probeer die niet te draineren\n' +
+      '- De exploit draait op een Anvil BSC fork\n\n' +
+      'EXPLOIT SCRIPT HELPERS (automatisch beschikbaar):\n' +
+      '- `provider` — ethers.js v6 JsonRpcProvider\n' +
+      '- `TARGET` — contract adres\n' +
+      '- `ethers` — ethers.js v6\n' +
+      '- `setBalance(addr, ethAmount)` — geef jezelf BNB\n' +
+      '- `fund(addr)` — geef 1000 BNB\n' +
+      '- NIET impersonate(owner) gebruiken! Maak een random wallet: `const attacker = ethers.Wallet.createRandom().connect(provider);`\n\n' +
+      'EXPLOIT SCRIPT STRUCTUUR:\n' +
+      '1. const attacker = new ethers.Wallet("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", provider);\n' +
+      '2. await fund(attacker.address);  // geef attacker BNB voor gas\n' +
+      '3. Log balansen VOOR de aanval\n' +
+      '4. Voer de aanval uit als attacker (NIET als owner)\n' +
+      '5. Log balansen NA de aanval\n' +
+      '6. console.log("WINST: $" + winst) of console.log("GEEN EXPLOIT MOGELIJK")\n\n' +
+      'Antwoord DIRECT met JSON (geen tekst ervoor, geen markdown):\n' +
+      '{"analysis": "wat je gevonden hebt (Nederlands)", "exploitable": true/false, "confidence": "HIGH/MEDIUM/LOW", "exploit_code": "werkend script of null"}\n\n' +
+      'Als je GEEN manier vindt om als niet-eigenaar geld eruit te halen: {"analysis":"Geen exploit mogelijk als niet-eigenaar","exploitable":false,"confidence":"HIGH","exploit_code":null}';
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-20250514',

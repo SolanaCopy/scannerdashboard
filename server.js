@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -145,7 +146,7 @@ app.delete('/api/scanner/results/:address', (req, res) => {
 const ANVIL_PATH = 'C:/Users/moham/.foundry/bin/anvil.exe';
 const FORGE_PATH = 'C:/Users/moham/.foundry/bin/forge.exe';
 const CAST_PATH = 'C:/Users/moham/.foundry/bin/cast.exe';
-const BSC_RPC = 'https://bsc-mainnet.public.blastapi.io';
+const BSC_RPC = 'https://bsc-dataseed1.binance.org';
 const BSCSCAN_KEY = process.env.BSCSCAN_API_KEY || 'P3RD5KVMAP39CB25HM97THVDXHVDCNEUIX';
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
 let anvilProcess = null;
@@ -154,42 +155,67 @@ let anvilTarget = null;
 const FOUNDRY_TMP = path.join(__dirname, 'tmp_foundry');
 if (!fs.existsSync(FOUNDRY_TMP)) fs.mkdirSync(FOUNDRY_TMP, { recursive: true });
 
+// Helper: kill alles op een port
+function killPort(port) {
+  try {
+    const out = execSync('netstat -ano | findstr LISTENING | findstr :' + port, { encoding: 'utf-8', timeout: 5000 });
+    const lines = out.trim().split('\n');
+    for (const line of lines) {
+      const pid = line.trim().split(/\s+/).pop();
+      if (pid && pid !== '0') {
+        try { execSync('taskkill /F /PID ' + pid, { timeout: 5000 }); } catch(e) {}
+      }
+    }
+  } catch(e) {}
+}
+
+// Start verse Anvil fork (altijd nieuw — voorkomt stale state)
+function startAnvil(address, blockNumber) {
+  return new Promise((resolve, reject) => {
+    // Kill alles op de port
+    if (anvilProcess) { try { anvilProcess.kill(); } catch(e) {} anvilProcess = null; }
+    killPort(anvilPort);
+
+    const args = ['--fork-url', BSC_RPC, '--port', String(anvilPort), '--chain-id', '56', '--auto-impersonate'];
+    if (blockNumber) args.push('--fork-block-number', String(blockNumber));
+
+    // Kleine delay na kill
+    setTimeout(() => {
+      try {
+        anvilProcess = spawn(ANVIL_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        anvilTarget = address;
+        let done = false;
+
+        const onData = (d) => {
+          const out = d.toString();
+          if (out.includes('Listening on') && !done) {
+            done = true;
+            resolve({ ok: true, port: anvilPort, address, rpc: 'http://127.0.0.1:' + anvilPort });
+          }
+        };
+        anvilProcess.stdout.on('data', onData);
+        anvilProcess.stderr.on('data', onData);
+        anvilProcess.on('error', (err) => { if (!done) { done = true; reject(err); } });
+        anvilProcess.on('exit', () => { anvilProcess = null; anvilTarget = null; });
+
+        setTimeout(() => {
+          if (!done) { done = true; try { anvilProcess.kill(); } catch(e) {} reject(new Error('Anvil timeout (30s) — RPC mogelijk traag, probeer opnieuw')); }
+        }, 30000);
+      } catch(err) { reject(err); }
+    }, 1000);
+  });
+}
+
 // Start Anvil fork
-app.post('/api/foundry/fork', (req, res) => {
+app.post('/api/foundry/fork', async (req, res) => {
   if (!authDash(req, res)) return;
   const { address, blockNumber } = req.body;
   if (!address) return res.status(400).json({ error: 'Address vereist' });
 
-  // Kill bestaande fork
-  if (anvilProcess) { try { anvilProcess.kill(); } catch(e) {} anvilProcess = null; }
-
-  const args = ['--fork-url', BSC_RPC, '--port', String(anvilPort), '--chain-id', '56', '--no-mining'];
-  if (blockNumber) args.push('--fork-block-number', String(blockNumber));
-
   try {
-    anvilProcess = spawn(ANVIL_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    anvilTarget = address;
-    let started = false;
-
-    const onData = (d) => {
-      const out = d.toString();
-      if (out.includes('Listening on') && !started) {
-        started = true;
-        res.json({ ok: true, port: anvilPort, address, rpc: `http://127.0.0.1:${anvilPort}` });
-      }
-    };
-    anvilProcess.stdout.on('data', onData);
-    anvilProcess.stderr.on('data', onData);
-
-    anvilProcess.on('error', (err) => {
-      if (!started) res.status(500).json({ error: err.message });
-    });
-
-    anvilProcess.on('exit', () => { anvilProcess = null; anvilTarget = null; });
-
-    // Timeout na 15s
-    setTimeout(() => { if (!started) { try { anvilProcess.kill(); } catch(e) {} res.status(500).json({ error: 'Anvil timeout' }); } }, 15000);
-  } catch (err) {
+    const result = await startAnvil(address, blockNumber);
+    return res.json(result);
+  } catch(err) {
     return res.status(500).json({ error: err.message });
   }
 });
@@ -202,9 +228,26 @@ app.post('/api/foundry/stop', (req, res) => {
 });
 
 // Anvil status
-app.get('/api/foundry/status', (req, res) => {
+app.get('/api/foundry/status', async (req, res) => {
   if (!authDash(req, res)) return;
-  return res.json({ running: !!anvilProcess, address: anvilTarget, port: anvilPort });
+  // Check of Anvil echt draait (ook als het niet via ons gestart is)
+  let running = !!anvilProcess;
+  if (!running) {
+    try {
+      const http = require('http');
+      const check = await new Promise((resolve) => {
+        const r = http.request({ hostname: '127.0.0.1', port: anvilPort, method: 'POST', headers: {'Content-Type':'application/json'}, timeout: 2000 }, (resp) => {
+          let d = ''; resp.on('data', c => d += c); resp.on('end', () => resolve(d));
+        });
+        r.on('error', () => resolve(null));
+        r.on('timeout', () => { r.destroy(); resolve(null); });
+        r.write('{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}');
+        r.end();
+      });
+      running = !!(check && check.includes('result'));
+    } catch(e) {}
+  }
+  return res.json({ running, address: anvilTarget, port: anvilPort });
 });
 
 // Fetch contract source + ABI van BSCScan
@@ -257,9 +300,26 @@ app.post('/api/foundry/cast', (req, res) => {
 });
 
 // Run exploit script op Anvil fork
-app.post('/api/foundry/run-exploit', (req, res) => {
+app.post('/api/foundry/run-exploit', async (req, res) => {
   if (!authDash(req, res)) return;
-  if (!anvilProcess) return res.status(400).json({ error: 'Start eerst een Anvil fork' });
+  // Check of Anvil draait (via process OF extern)
+  let anvilRunning = !!anvilProcess;
+  if (!anvilRunning) {
+    try {
+      const http = require('http');
+      const check = await new Promise((resolve) => {
+        const r = http.request({ hostname: '127.0.0.1', port: anvilPort, method: 'POST', headers: {'Content-Type':'application/json'}, timeout: 2000 }, (resp) => {
+          let d = ''; resp.on('data', c => d += c); resp.on('end', () => resolve(d));
+        });
+        r.on('error', () => resolve(null));
+        r.on('timeout', () => { r.destroy(); resolve(null); });
+        r.write('{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}');
+        r.end();
+      });
+      anvilRunning = !!(check && check.includes('result'));
+    } catch(e) {}
+  }
+  if (!anvilRunning) return res.status(400).json({ error: 'Start eerst een Anvil fork' });
 
   const { code, address } = req.body;
   if (!code) return res.status(400).json({ error: 'Code vereist' });
@@ -305,9 +365,78 @@ main().then(() => { console.log('\\n=== EXPLOIT KLAAR ==='); process.exit(0); })
   } catch (err) {
     try { fs.unlinkSync(exploitFile); } catch(e) {}
     const output = (err.stdout || '') + '\n' + (err.stderr || '');
+
+    // Auto-restart bij stale fork
+    if (output.includes('missing trie node') || output.includes('header not found')) {
+      try {
+        console.log('[FOUNDRY] Stale fork detected, restarting Anvil...');
+        await startAnvil(address || anvilTarget, null);
+        return res.json({ ok: false, output: 'Fork was verouderd — automatisch herstart. Klik opnieuw op RUN.', autoRestarted: true });
+      } catch(e) {
+        return res.json({ ok: false, output: output.substring(0, 5000), error: 'Fork verouderd + herstart mislukt: ' + e.message });
+      }
+    }
+
     return res.json({ ok: false, output: output.substring(0, 5000), error: err.message });
   }
 });
+
+// Helper: haal on-chain info op via cast
+function castCall(address, sig, rpc) {
+  try {
+    return execSync(`"${CAST_PATH}" call ${address} "${sig}" --rpc-url ${rpc || 'http://127.0.0.1:' + anvilPort}`, {
+      timeout: 10000, encoding: 'utf-8'
+    }).trim();
+  } catch(e) { return null; }
+}
+
+async function gatherOnChainContext(address) {
+  const rpc = `http://127.0.0.1:${anvilPort}`;
+  const info = { owner: null, balances: {}, functions: [], state: {} };
+  const STABLES = {
+    USDT: '0x55d398326f99059fF775485246999027B3197955',
+    USDC: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+    BUSD: '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56',
+    WBNB: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c'
+  };
+
+  // Owner (diverse varianten)
+  for (const sig of ['owner()(address)', '_owner()(address)', 'admin()(address)', 'governance()(address)']) {
+    const r = castCall(address, sig, rpc);
+    if (r && r !== '0x0000000000000000000000000000000000000000') { info.owner = r; break; }
+  }
+
+  // Token balansen
+  for (const [name, tokenAddr] of Object.entries(STABLES)) {
+    const r = castCall(tokenAddr, `balanceOf(address)(uint256) ${address}`, rpc);
+    if (r && r !== '0') {
+      try { info.balances[name] = parseFloat(r) / 1e18; } catch(e) {}
+    }
+  }
+
+  // BNB balance
+  try {
+    const bnb = execSync(`"${CAST_PATH}" balance ${address} --rpc-url ${rpc}`, { timeout: 10000, encoding: 'utf-8' }).trim();
+    if (bnb && bnb !== '0') info.balances['BNB'] = parseFloat(bnb) / 1e18;
+  } catch(e) {}
+
+  // Contract state checks
+  for (const [label, sig] of [['paused', 'paused()(bool)'], ['totalSupply', 'totalSupply()(uint256)'], ['decimals', 'decimals()(uint8)']]) {
+    const r = castCall(address, sig, rpc);
+    if (r !== null) info.state[label] = r;
+  }
+
+  // Proxy implementation
+  try {
+    const implSlot = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+    const impl = execSync(`"${CAST_PATH}" storage ${address} ${implSlot} --rpc-url ${rpc}`, { timeout: 10000, encoding: 'utf-8' }).trim();
+    if (impl && impl !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+      info.state.proxyImpl = '0x' + impl.slice(26);
+    }
+  } catch(e) {}
+
+  return info;
+}
 
 // AI exploit generatie
 app.post('/api/foundry/ai-exploit', async (req, res) => {
@@ -319,44 +448,76 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
 
   try {
     const axios = require('axios');
+
+    // Stap 1: Haal on-chain context op
+    let onChainInfo = { owner: null, balances: {}, functions: [], state: {} };
+    try {
+      onChainInfo = await gatherOnChainContext(address);
+    } catch(e) { console.error('[AI] On-chain context fout:', e.message); }
+
+    // Stap 2: Bouw ABI samenvatting
+    let abiSummary = 'Geen ABI beschikbaar';
+    try {
+      const parsedAbi = typeof abi === 'string' ? JSON.parse(abi) : (abi || []);
+      if (parsedAbi.length > 0) {
+        const fns = parsedAbi.filter(a => a.type === 'function').map(f => {
+          const inputs = (f.inputs || []).map(i => i.type + ' ' + i.name).join(', ');
+          const outputs = (f.outputs || []).map(o => o.type).join(', ');
+          const mut = f.stateMutability || '';
+          return f.name + '(' + inputs + ') ' + mut + (outputs ? ' → ' + outputs : '');
+        });
+        abiSummary = fns.join('\n');
+      }
+    } catch(e) {}
+
+    // Stap 3: Bouw context string
+    const balanceStr = Object.entries(onChainInfo.balances).map(function([k,v]) { return k + ': ' + v.toFixed(4); }).join(', ') || 'geen tokens gevonden';
+    const stateStr = Object.entries(onChainInfo.state).map(function([k,v]) { return k + ': ' + v; }).join(', ') || 'geen state opgehaald';
+
     const trimmedSource = source.length > 30000 ? source.substring(0, 30000) + '\n// ... [TRUNCATED]' : source;
 
-    const prompt = `Je bent een elite smart contract security auditor (bug bounty hunter). Analyseer dit BSC contract en genereer een exploit script.
-
-Contract: ${address}
-Chain: BSC (chainId 56)
-
-\`\`\`solidity
-${trimmedSource}
-\`\`\`
-
-Zoek naar BUSINESS LOGIC BUGS:
-1. Rekenfouten, afrondingsbugs, fee exploits
-2. Flash loan aanvallen (spot price als oracle)
-3. Dubbel claimen, timing exploits, verkeerde bookkeeping
-4. Cross-function state inconsistencies
-5. Eerste depositor / donation attacks
-6. Access control gaps (subtiel, niet simpel "missing onlyOwner")
-
-Genereer een exploit in PUUR JavaScript (ethers.js v6). Het script krijgt automatisch:
-- \`provider\` (JsonRpcProvider op Anvil fork)
-- \`TARGET\` (contract adres)
-- \`impersonate(addr)\` functie
-- \`setBalance(addr, amount)\` functie
-- \`fund(addr)\` functie
-
-Antwoord in JSON:
-{
-  "analysis": "korte uitleg van gevonden bugs (max 5 bullets)",
-  "exploitable": true/false,
-  "confidence": "HIGH/MEDIUM/LOW",
-  "exploit_code": "// alleen de body van main(), GEEN imports/wrapping"
-}
-
-Alleen echte bugs. Als niks gevonden: {"analysis":"Geen exploiteerbare bugs gevonden","exploitable":false,"confidence":"HIGH","exploit_code":null}`;
+    const prompt = 'Je bent een elite smart contract security auditor (bug bounty hunter). Analyseer dit BSC contract en genereer een exploit script.\n\n' +
+      'CONTRACT INFO:\n' +
+      '- Adres: ' + address + '\n' +
+      '- Chain: BSC (chainId 56)\n' +
+      '- Owner/Admin: ' + (onChainInfo.owner || 'GEEN owner() functie gevonden — probeer NIET owner() aan te roepen') + '\n' +
+      '- Token balansen in contract: ' + balanceStr + '\n' +
+      '- Contract state: ' + stateStr + '\n' +
+      (onChainInfo.state.proxyImpl ? '- PROXY contract → implementatie: ' + onChainInfo.state.proxyImpl + '\n' : '') +
+      '\nABI (beschikbare functies):\n' + abiSummary + '\n\n' +
+      'SOURCE CODE:\n```solidity\n' + trimmedSource + '\n```\n\n' +
+      'OPDRACHT:\nZoek naar BUSINESS LOGIC BUGS:\n' +
+      '1. Rekenfouten (afrondingsbugs, verkeerde fee/reward berekening, overflow bij vermenigvuldiging)\n' +
+      '2. Flash loan aanvallen (spot price als oracle, manipuleerbare reserves)\n' +
+      '3. Dubbel claimen, timing exploits, verkeerde bookkeeping\n' +
+      '4. Cross-function reentrancy of state inconsistencies\n' +
+      '5. Eerste depositor / donation attacks\n' +
+      '6. Access control gaps (subtiel, niet simpel "missing onlyOwner")\n\n' +
+      'BELANGRIJK:\n' +
+      '- Roep ALLEEN functies aan die in de ABI staan\n' +
+      '- Als er geen owner() is, gebruik die NIET\n' +
+      '- Check de token balansen hierboven — als een token 0 is, probeer die niet te draineren\n' +
+      '- De exploit draait op een Anvil BSC fork, NIET op Hardhat\n\n' +
+      'Het script krijgt automatisch deze variabelen en helpers:\n' +
+      '- `provider` — ethers.js v6 JsonRpcProvider op Anvil fork (http://127.0.0.1:' + anvilPort + ')\n' +
+      '- `TARGET` — contract adres ("' + address + '")\n' +
+      '- `ethers` — ethers.js v6 library (al geïmporteerd)\n' +
+      '- `impersonate(addr)` — retourneert een signer die als dat adres kan transacten\n' +
+      '- `setBalance(addr, ethAmount)` — zet BNB balance (string in ETH)\n' +
+      '- `fund(addr)` — geeft 1000 BNB\n\n' +
+      'Voor impersonation gebruik:\n' +
+      '  await provider.send(\'anvil_impersonateAccount\', [addr]);\n' +
+      '  const signer = new ethers.Wallet(\'0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\', provider);\n' +
+      '  // OF voor send-as: provider.send(\'eth_sendTransaction\', [{from: addr, to: ..., data: ...}])\n\n' +
+      'Gebruik console.log() om elke stap + balans veranderingen te loggen.\n\n' +
+      'Antwoord in EXACT dit JSON format (geen markdown, puur JSON):\n' +
+      '{\n  "analysis": "korte uitleg van gevonden bugs (max 5 bullets, elke bullet op nieuwe regel)",\n' +
+      '  "exploitable": true/false,\n  "confidence": "HIGH/MEDIUM/LOW",\n' +
+      '  "exploit_code": "// alleen de body van main(), GEEN imports/wrapping, GEEN async function main() wrapper"\n}\n\n' +
+      'Als er GEEN business logic bugs zijn: {"analysis":"Geen exploiteerbare bugs gevonden","exploitable":false,"confidence":"HIGH","exploit_code":null}';
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6-20250514',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     }, {
@@ -1068,8 +1229,11 @@ async function loadContract() {
     const r = await fetch('/api/foundry/contract/' + addr + '?key=' + KEY);
     const d = await r.json();
     if (d.source) {
-      document.getElementById('fl-source').textContent = '// ' + d.name + ' (Compiler: ' + d.compiler + ')\\n// Verified: ' + d.verified + '\\n\\n' + d.source.substring(0, 50000);
+      contractAbi = d.abi || null;
+      const fnCount = (d.abi || []).filter(a => a.type === 'function').length;
+      document.getElementById('fl-source').textContent = '// ' + d.name + ' (Compiler: ' + d.compiler + ')\\n// Verified: ' + d.verified + ' | ABI: ' + fnCount + ' functies\\n\\n' + d.source.substring(0, 50000);
     } else {
+      contractAbi = null;
       document.getElementById('fl-source').textContent = 'Geen verified source gevonden voor ' + addr;
     }
   } catch(e) {
@@ -1090,6 +1254,13 @@ async function runExploit() {
       body: JSON.stringify({ code, address: addr })
     });
     const d = await r.json();
+    if (d.autoRestarted) {
+      document.getElementById('fl-output').style.color = '#f0b429';
+      document.getElementById('fl-output').textContent = 'Fork was verouderd — automatisch herstart. Opnieuw uitvoeren...';
+      checkAnvilStatus();
+      setTimeout(runExploit, 3000);
+      return;
+    }
     document.getElementById('fl-output').style.color = d.ok ? '#3fb950' : '#f85149';
     document.getElementById('fl-output').textContent = d.output || d.error || 'Geen output';
   } catch(e) {
@@ -1098,18 +1269,20 @@ async function runExploit() {
   }
 }
 
+let contractAbi = null; // wordt gezet door loadContract
+
 async function aiExploit() {
   const addr = document.getElementById('fl-address').value.trim();
   const source = document.getElementById('fl-source').textContent;
   if (!addr) return alert('Vul een contract adres in');
   if (!source || source.includes('Klik') || source.includes('Laden')) return alert('Laad eerst de contract source');
 
-  document.getElementById('fl-analysis').textContent = 'AI analyseert contract...';
+  document.getElementById('fl-analysis').textContent = 'AI analyseert contract + haalt on-chain data op...\\nDit duurt 15-30 seconden...';
   document.getElementById('fl-analysis').style.color = '#f0b429';
   try {
     const r = await fetch('/api/foundry/ai-exploit?key=' + KEY, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ address: addr, source })
+      body: JSON.stringify({ address: addr, source, abi: contractAbi })
     });
     const d = await r.json();
     if (d.ok !== false) {

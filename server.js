@@ -171,13 +171,15 @@ app.post('/api/foundry/fork', (req, res) => {
     anvilTarget = address;
     let started = false;
 
-    anvilProcess.stdout.on('data', (d) => {
+    const onData = (d) => {
       const out = d.toString();
       if (out.includes('Listening on') && !started) {
         started = true;
         res.json({ ok: true, port: anvilPort, address, rpc: `http://127.0.0.1:${anvilPort}` });
       }
-    });
+    };
+    anvilProcess.stdout.on('data', onData);
+    anvilProcess.stderr.on('data', onData);
 
     anvilProcess.on('error', (err) => {
       if (!started) res.status(500).json({ error: err.message });

@@ -444,6 +444,7 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
   if (!CLAUDE_API_KEY) return res.status(400).json({ error: 'Geen Claude API key geconfigureerd' });
 
   const { address, source, abi } = req.body;
+  console.log('[AI] Request ontvangen:', address, '| source:', (source||'').length, 'chars | abi:', Array.isArray(abi) ? abi.length + ' items' : typeof abi);
   if (!source) return res.status(400).json({ error: 'Contract source vereist' });
 
   try {
@@ -514,6 +515,12 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
       '{\n  "analysis": "korte uitleg van gevonden bugs (max 5 bullets, elke bullet op nieuwe regel)",\n' +
       '  "exploitable": true/false,\n  "confidence": "HIGH/MEDIUM/LOW",\n' +
       '  "exploit_code": "// alleen de body van main(), GEEN imports/wrapping, GEEN async function main() wrapper"\n}\n\n' +
+      'KRITIEK: Als exploitable=true, dan MOET exploit_code een werkend JavaScript script bevatten. exploit_code mag ALLEEN null zijn als exploitable=false.\n' +
+      'Het exploit script moet:\n' +
+      '- Eerst balansen loggen (voor)\n' +
+      '- De exploit uitvoeren\n' +
+      '- Balansen opnieuw loggen (na)\n' +
+      '- Duidelijk tonen of er winst is gemaakt\n\n' +
       'Als er GEEN business logic bugs zijn: {"analysis":"Geen exploiteerbare bugs gevonden","exploitable":false,"confidence":"HIGH","exploit_code":null}';
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
@@ -526,12 +533,87 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
     });
 
     const aiText = response.data.content[0].text;
+    console.log('[AI] Claude response (eerste 300 chars):', aiText.substring(0, 300));
     const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return res.json({ ok: false, error: 'Geen JSON in AI response' });
+    if (!jsonMatch) {
+      console.log('[AI] Geen JSON gevonden in response');
+      return res.json({ ok: false, error: 'Geen JSON in AI response', raw: aiText.substring(0, 500) });
+    }
 
     const result = JSON.parse(jsonMatch[0]);
+    console.log('[AI] Resultaat:', result.exploitable, '| confidence:', result.confidence, '| findings:', (result.findings||[]).length);
     return res.json({ ok: true, ...result });
   } catch (err) {
+    console.error('[AI] FOUT:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// === PASHOV AUDIT ===
+app.post('/api/foundry/pashov-audit', async (req, res) => {
+  if (!authDash(req, res)) return;
+  if (!CLAUDE_API_KEY) return res.status(400).json({ error: 'Geen Claude API key' });
+
+  const { address, source } = req.body;
+  if (!source) return res.status(400).json({ error: 'Contract source vereist' });
+
+  try {
+    const axios = require('axios');
+    const trimmedSource = source.length > 40000 ? source.substring(0, 40000) + '\n// ... [TRUNCATED]' : source;
+
+    // Lees attack vectors
+    let attackVectors = '';
+    try { attackVectors = fs.readFileSync('C:/pashov-skills/solidity-auditor/references/attack-vectors/attack-vectors.md', 'utf8').substring(0, 8000); } catch(e) {}
+
+    const prompt = 'You are running a parallelized smart contract security audit with 3 specialized agents. Analyze this BSC contract thoroughly.\n\n' +
+      'Contract: ' + address + '\n\n' +
+      '```solidity\n' + trimmedSource + '\n```\n\n' +
+      '## AGENT 1: VECTOR SCAN\n' +
+      'You are an attacker that exploits known attack vectors. For each vector below, check if it applies to this contract.\n' +
+      'Known vectors:\n' + attackVectors.substring(0, 4000) + '\n\n' +
+      '## AGENT 2: MATH PRECISION\n' +
+      'You exploit integer arithmetic: rounding errors, precision loss, decimal mismatches, overflow, scale mixing.\n' +
+      'Map all fixed-point systems. Find wrong rounding direction (deposits round DOWN, withdrawals round DOWN, debt UP, fees UP).\n' +
+      'Find division-before-multiplication chains. Find zero-round-to-steal patterns. Every finding needs concrete numbers.\n\n' +
+      '## AGENT 3: ECONOMIC SECURITY\n' +
+      'You exploit external dependencies, value flows, and economic incentives. You have unlimited capital and flash loans.\n' +
+      'Break dependencies, exploit token misbehavior (fee-on-transfer, rebasing, void-return).\n' +
+      'Construct deposit→manipulate→withdraw in single tx. Push fee formulas to zero or max.\n\n' +
+      '## OUTPUT FORMAT\n' +
+      'Return a JSON object with this structure:\n' +
+      '{\n' +
+      '  "findings": [{"agent": "vector-scan|math-precision|economic-security", "type": "FINDING|LEAD", "severity": "HIGH|MEDIUM|LOW", "contract": "Name", "function": "func", "bug_class": "tag", "description": "one sentence", "proof": "concrete values/trace", "fix": "suggestion"}],\n' +
+      '  "summary": "2-3 sentence overall assessment",\n' +
+      '  "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE"\n' +
+      '}\n\n' +
+      'RULES:\n' +
+      '- FINDINGs have concrete, unguarded, exploitable attack paths with proof\n' +
+      '- LEADs have real code smells with partial paths\n' +
+      '- Do NOT report: admin-only functions doing admin things, standard DeFi tradeoffs, self-harm-only bugs\n' +
+      '- Every FINDING must have a proof field with concrete values\n' +
+      '- Be thorough but honest — if the contract is secure, say so';
+
+    console.log('[PASHOV] Audit gestart voor', address, '| source:', trimmedSource.length, 'chars');
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      timeout: 90000
+    });
+
+    const aiText = response.data.content[0].text;
+    console.log('[PASHOV] Response (eerste 200):', aiText.substring(0, 200));
+    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ ok: false, error: 'Geen JSON', raw: aiText.substring(0, 1000) });
+
+    const result = JSON.parse(jsonMatch[0]);
+    console.log('[PASHOV] Findings:', (result.findings || []).length, '| Risk:', result.risk_level);
+    return res.json({ ok: true, ...result });
+  } catch(err) {
+    console.error('[PASHOV] Fout:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -807,6 +889,7 @@ app.get('/', (req, res) => {
     <button onclick="stopFork()" style="background:#21262d;color:#f85149;border:1px solid #f8514944;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">Stop</button>
     <button onclick="loadContract()" style="background:#21262d;color:#58a6ff;border:1px solid #58a6ff44;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">Laad Source</button>
     <button onclick="aiExploit()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">AI Exploit</button>
+    <button onclick="pashovAudit()" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#0a0e17;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px">Pashov Audit</button>
   </div>
 
   <div style="padding:0 24px 8px;display:flex;gap:16px">
@@ -834,9 +917,15 @@ console.log('Geimpersoneerd als owner');</textarea>
     </div>
   </div>
 
-  <div style="padding:0 24px 8px">
-    <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">AI Analyse</label>
-    <div id="fl-analysis" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:13px;color:#8b949e;min-height:60px;margin-top:4px;white-space:pre-wrap">Nog geen analyse uitgevoerd</div>
+  <div style="padding:0 24px 8px;display:flex;gap:16px">
+    <div style="flex:1">
+      <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">AI Exploit Analyse</label>
+      <div id="fl-analysis" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:13px;color:#8b949e;min-height:60px;margin-top:4px;white-space:pre-wrap">Nog geen analyse uitgevoerd</div>
+    </div>
+    <div style="flex:1">
+      <label style="font-size:11px;color:#f59e0b;text-transform:uppercase;letter-spacing:1px;font-weight:700">Pashov Audit (3 Agents)</label>
+      <div id="fl-pashov" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:12px;color:#8b949e;min-height:60px;margin-top:4px;max-height:400px;overflow-y:auto">Klik 'Pashov Audit' om professionele security scan te starten</div>
+    </div>
   </div>
 
   <div style="padding:0 24px 24px">
@@ -1291,6 +1380,10 @@ async function aiExploit() {
       document.getElementById('fl-analysis').textContent = conf + ' Confidence: ' + (d.confidence || '?') + '\\nExploitable: ' + (d.exploitable ? 'JA' : 'NEE') + '\\n\\n' + (d.analysis || 'Geen findings');
       if (d.exploit_code) {
         document.getElementById('fl-code').value = d.exploit_code;
+      } else if (d.exploitable) {
+        // AI vond bugs maar genereerde geen code — maak een basis recon
+        const addr = document.getElementById('fl-address').value.trim();
+        document.getElementById('fl-code').value = '// AI vond bugs maar genereerde geen exploit code.\\n// Hieronder een basis recon script. Pas het aan op basis van de analyse hierboven.\\n\\nconst USDT = "0x55d398326f99059fF775485246999027B3197955";\\nconst USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d";\\nconst BUSD = "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56";\\nconst erc20 = ["function balanceOf(address) view returns (uint256)"];\\n\\nconsole.log("=== CONTRACT RECON ===");\\nconsole.log("Target:", TARGET);\\n\\n// Balansen\\nfor (const [name, addr] of [["USDT", USDT], ["USDC", USDC], ["BUSD", BUSD]]) {\\n  const bal = await new ethers.Contract(addr, erc20, provider).balanceOf(TARGET);\\n  if (bal > 0n) console.log(name + ":", ethers.formatUnits(bal, 18));\\n}\\nconsole.log("BNB:", ethers.formatEther(await provider.getBalance(TARGET)));\\n\\n// TODO: Voeg exploit logica toe op basis van de AI analyse';
       }
     } else {
       document.getElementById('fl-analysis').style.color = '#f85149';
@@ -1299,6 +1392,72 @@ async function aiExploit() {
   } catch(e) {
     document.getElementById('fl-analysis').style.color = '#f85149';
     document.getElementById('fl-analysis').textContent = 'FOUT: ' + e.message;
+  }
+}
+
+async function pashovAudit() {
+  const addr = document.getElementById('fl-address').value.trim();
+  const source = document.getElementById('fl-source').textContent;
+  if (!addr) return alert('Vul een contract adres in');
+  if (!source || source.includes('Klik') || source.includes('Laden')) return alert('Laad eerst de contract source');
+
+  const panel = document.getElementById('fl-pashov');
+  panel.style.color = '#f59e0b';
+  panel.innerHTML = '<div style="font-weight:700">Pashov Audit draait...</div><div style="margin-top:8px">Agent 1: Vector Scan...<br>Agent 2: Math Precision...<br>Agent 3: Economic Security...<br><br>Dit duurt 30-60 seconden</div>';
+
+  try {
+    const r = await fetch('/api/foundry/pashov-audit?key=' + KEY, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ address: addr, source })
+    });
+    const d = await r.json();
+
+    if (d.ok !== false && d.findings) {
+      const riskColors = { CRITICAL: '#f85149', HIGH: '#f85149', MEDIUM: '#f0b429', LOW: '#8b949e', SAFE: '#3fb950' };
+      const riskColor = riskColors[d.risk_level] || '#8b949e';
+
+      let html = '<div style="font-weight:700;font-size:14px;color:' + riskColor + ';margin-bottom:8px">RISK: ' + (d.risk_level || '?') + '</div>';
+      html += '<div style="color:#c9d1d9;margin-bottom:12px;font-size:12px">' + (d.summary || '') + '</div>';
+
+      if (d.findings.length === 0) {
+        html += '<div style="color:#3fb950">Geen findings - contract lijkt veilig</div>';
+      } else {
+        const findings = d.findings.filter(f => f.type === 'FINDING');
+        const leads = d.findings.filter(f => f.type === 'LEAD');
+
+        if (findings.length > 0) {
+          html += '<div style="font-weight:700;color:#f85149;margin-bottom:6px">FINDINGS (' + findings.length + ')</div>';
+          findings.forEach((f, i) => {
+            const sevColor = f.severity === 'HIGH' ? '#f85149' : f.severity === 'MEDIUM' ? '#f0b429' : '#8b949e';
+            html += '<div style="background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:8px">';
+            html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><span style="background:' + sevColor + '22;color:' + sevColor + ';padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700">' + f.severity + '</span>';
+            html += '<span style="font-size:10px;color:#8b949e">' + (f.agent || '') + '</span></div>';
+            html += '<div style="color:#c9d1d9;font-weight:600;font-size:12px">' + (f.bug_class || '') + ' in ' + (f.function || '?') + '</div>';
+            html += '<div style="color:#8b949e;font-size:11px;margin-top:4px">' + (f.description || '') + '</div>';
+            if (f.proof) html += '<div style="color:#58a6ff;font-size:11px;margin-top:4px;font-family:monospace">Proof: ' + f.proof.substring(0, 200) + '</div>';
+            if (f.fix) html += '<div style="color:#3fb950;font-size:11px;margin-top:4px">Fix: ' + f.fix + '</div>';
+            html += '</div>';
+          });
+        }
+
+        if (leads.length > 0) {
+          html += '<div style="font-weight:700;color:#f0b429;margin:12px 0 6px">LEADS (' + leads.length + ')</div>';
+          leads.forEach(f => {
+            html += '<div style="padding:6px 0;border-bottom:1px solid #21262d;font-size:11px">';
+            html += '<span style="color:#f0b429;font-weight:600">[' + (f.agent || '') + ']</span> ';
+            html += '<span style="color:#c9d1d9">' + (f.bug_class || '') + '</span> — ';
+            html += '<span style="color:#8b949e">' + (f.description || '') + '</span></div>';
+          });
+        }
+      }
+      panel.innerHTML = html;
+    } else {
+      panel.style.color = '#f85149';
+      panel.textContent = 'FOUT: ' + (d.error || d.raw || 'Onbekend');
+    }
+  } catch(e) {
+    panel.style.color = '#f85149';
+    panel.textContent = 'FOUT: ' + e.message;
   }
 }
 

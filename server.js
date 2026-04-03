@@ -534,13 +534,29 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
 
     const aiText = response.data.content[0].text;
     console.log('[AI] Claude response (eerste 300 chars):', aiText.substring(0, 300));
-    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+
+    // Robuuste JSON extractie
+    let result = null;
+    const codeBlock = aiText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlock) { try { result = JSON.parse(codeBlock[1]); } catch(e) {} }
+    if (!result) {
+      const start = aiText.indexOf('"analysis"');
+      if (start > 0) {
+        const bracePos = aiText.lastIndexOf('{', start);
+        if (bracePos >= 0) {
+          let depth = 0;
+          for (let i = bracePos; i < aiText.length; i++) {
+            if (aiText[i] === '{') depth++;
+            if (aiText[i] === '}') depth--;
+            if (depth === 0) { try { result = JSON.parse(aiText.substring(bracePos, i + 1)); } catch(e) {} break; }
+          }
+        }
+      }
+    }
+    if (!result) {
       console.log('[AI] Geen JSON gevonden in response');
       return res.json({ ok: false, error: 'Geen JSON in AI response', raw: aiText.substring(0, 500) });
     }
-
-    const result = JSON.parse(jsonMatch[0]);
     console.log('[AI] Resultaat:', result.exploitable, '| confidence:', result.confidence, '| findings:', (result.findings||[]).length);
     return res.json({ ok: true, ...result });
   } catch (err) {
@@ -605,11 +621,51 @@ app.post('/api/foundry/pashov-audit', async (req, res) => {
     });
 
     const aiText = response.data.content[0].text;
-    console.log('[PASHOV] Response (eerste 200):', aiText.substring(0, 200));
-    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return res.json({ ok: false, error: 'Geen JSON', raw: aiText.substring(0, 1000) });
+    console.log('[PASHOV] Response (eerste 300):', aiText.substring(0, 300));
 
-    const result = JSON.parse(jsonMatch[0]);
+    // Robuuste JSON extractie: zoek het object dat "findings" bevat
+    let result = null;
+    // Probeer eerst: zoek ```json ... ``` block
+    const codeBlock = aiText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlock) {
+      try { result = JSON.parse(codeBlock[1]); } catch(e) {}
+    }
+    // Probeer: vind { dat "findings" bevat door balanced braces te tellen
+    if (!result) {
+      const start = aiText.indexOf('{"findings"');
+      if (start === -1) {
+        // Probeer ook met newline
+        const start2 = aiText.indexOf('"findings"');
+        if (start2 > 0) {
+          // Zoek de { ervoor
+          const bracePos = aiText.lastIndexOf('{', start2);
+          if (bracePos >= 0) {
+            let depth = 0;
+            for (let i = bracePos; i < aiText.length; i++) {
+              if (aiText[i] === '{') depth++;
+              if (aiText[i] === '}') depth--;
+              if (depth === 0) {
+                try { result = JSON.parse(aiText.substring(bracePos, i + 1)); } catch(e) {}
+                break;
+              }
+            }
+          }
+        }
+      } else {
+        let depth = 0;
+        for (let i = start; i < aiText.length; i++) {
+          if (aiText[i] === '{') depth++;
+          if (aiText[i] === '}') depth--;
+          if (depth === 0) {
+            try { result = JSON.parse(aiText.substring(start, i + 1)); } catch(e) {}
+            break;
+          }
+        }
+      }
+    }
+
+    if (!result) return res.json({ ok: false, error: 'Kon JSON niet parsen', raw: aiText.substring(0, 1500) });
+
     console.log('[PASHOV] Findings:', (result.findings || []).length, '| Risk:', result.risk_level);
     return res.json({ ok: true, ...result });
   } catch(err) {

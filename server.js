@@ -941,22 +941,9 @@ app.get('/', (req, res) => {
         <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">Exploit Code (JavaScript / ethers v6)</label>
         <button onclick="runExploit()" style="background:#3fb950;color:#0a0e17;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px">▶ RUN</button>
       </div>
-      <textarea id="fl-code" spellcheck="false" style="width:100%;height:400px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:12px;border-radius:8px;font-family:'Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;tab-size:2">// Beschikbaar: provider, TARGET, impersonate(addr), setBalance(addr, eth), fund(addr)
-// Voorbeeld:
-
-const abi = ['function owner() view returns (address)', 'function balanceOf(address) view returns (uint256)'];
-const contract = new ethers.Contract(TARGET, abi, provider);
-
-const owner = await contract.owner();
-console.log('Owner:', owner);
-
-// Impersonate de owner
-await impersonate(owner);
-await fund(owner);
-const signer = await provider.getSigner(owner);
-
-// Doe iets als owner...
-console.log('Geimpersoneerd als owner');</textarea>
+      <textarea id="fl-code" spellcheck="false" style="width:100%;height:400px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:12px;border-radius:8px;font-family:'Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;tab-size:2">// Klik "AI Exploit" om automatisch exploit code te genereren
+// Of schrijf je eigen code hier. Helpers:
+// provider, TARGET, ethers, impersonate(addr), setBalance(addr, eth), fund(addr)</textarea>
     </div>
   </div>
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { execSync, spawn } = require('child_process');
 const app = express();
 const PORT = process.env.PORT || 3099;
 const SCANNER_API_KEY = process.env.SCANNER_API_KEY || 'bsc-scanner-2026-secret';
@@ -140,6 +141,238 @@ app.delete('/api/scanner/results/:address', (req, res) => {
   return res.json({ ok: true, removed: before - scannerResults.length });
 });
 
+// === FOUNDRY LAB ===
+const ANVIL_PATH = 'C:/Users/moham/.foundry/bin/anvil.exe';
+const FORGE_PATH = 'C:/Users/moham/.foundry/bin/forge.exe';
+const CAST_PATH = 'C:/Users/moham/.foundry/bin/cast.exe';
+const BSC_RPC = 'https://bsc-mainnet.public.blastapi.io';
+const BSCSCAN_KEY = process.env.BSCSCAN_API_KEY || 'P3RD5KVMAP39CB25HM97THVDXHVDCNEUIX';
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
+let anvilProcess = null;
+let anvilPort = 8545;
+let anvilTarget = null;
+const FOUNDRY_TMP = path.join(__dirname, 'tmp_foundry');
+if (!fs.existsSync(FOUNDRY_TMP)) fs.mkdirSync(FOUNDRY_TMP, { recursive: true });
+
+// Start Anvil fork
+app.post('/api/foundry/fork', (req, res) => {
+  if (!authDash(req, res)) return;
+  const { address, blockNumber } = req.body;
+  if (!address) return res.status(400).json({ error: 'Address vereist' });
+
+  // Kill bestaande fork
+  if (anvilProcess) { try { anvilProcess.kill(); } catch(e) {} anvilProcess = null; }
+
+  const args = ['--fork-url', BSC_RPC, '--port', String(anvilPort), '--chain-id', '56', '--no-mining'];
+  if (blockNumber) args.push('--fork-block-number', String(blockNumber));
+
+  try {
+    anvilProcess = spawn(ANVIL_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    anvilTarget = address;
+    let started = false;
+
+    anvilProcess.stdout.on('data', (d) => {
+      const out = d.toString();
+      if (out.includes('Listening on') && !started) {
+        started = true;
+        res.json({ ok: true, port: anvilPort, address, rpc: `http://127.0.0.1:${anvilPort}` });
+      }
+    });
+
+    anvilProcess.on('error', (err) => {
+      if (!started) res.status(500).json({ error: err.message });
+    });
+
+    anvilProcess.on('exit', () => { anvilProcess = null; anvilTarget = null; });
+
+    // Timeout na 15s
+    setTimeout(() => { if (!started) { try { anvilProcess.kill(); } catch(e) {} res.status(500).json({ error: 'Anvil timeout' }); } }, 15000);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Stop Anvil fork
+app.post('/api/foundry/stop', (req, res) => {
+  if (!authDash(req, res)) return;
+  if (anvilProcess) { try { anvilProcess.kill(); } catch(e) {} anvilProcess = null; anvilTarget = null; }
+  return res.json({ ok: true });
+});
+
+// Anvil status
+app.get('/api/foundry/status', (req, res) => {
+  if (!authDash(req, res)) return;
+  return res.json({ running: !!anvilProcess, address: anvilTarget, port: anvilPort });
+});
+
+// Fetch contract source + ABI van BSCScan
+app.get('/api/foundry/contract/:address', async (req, res) => {
+  if (!authDash(req, res)) return;
+  const addr = req.params.address;
+  try {
+    const axios = require('axios');
+    const [srcRes, abiRes] = await Promise.all([
+      axios.get(`https://api.etherscan.io/v2/api?chainid=56&module=contract&action=getsourcecode&address=${addr}&apikey=${BSCSCAN_KEY}`),
+      axios.get(`https://api.etherscan.io/v2/api?chainid=56&module=contract&action=getabi&address=${addr}&apikey=${BSCSCAN_KEY}`)
+    ]);
+    const contract = srcRes.data.result?.[0] || {};
+    let source = contract.SourceCode || '';
+    if (source.startsWith('{{')) {
+      try {
+        const parsed = JSON.parse(source.slice(1, -1));
+        const sources = parsed.sources || parsed;
+        source = Object.values(sources).map(s => s.content || s).join('\n\n');
+      } catch(e) {}
+    }
+    let abi = [];
+    try { abi = JSON.parse(abiRes.data.result || '[]'); } catch(e) {}
+
+    return res.json({
+      name: contract.ContractName || 'Onbekend',
+      source: source.substring(0, 100000),
+      abi,
+      compiler: contract.CompilerVersion || '',
+      verified: !!source
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Cast call (lees functie aanroepen via Foundry cast)
+app.post('/api/foundry/cast', (req, res) => {
+  if (!authDash(req, res)) return;
+  const { address, functionSig, args: callArgs } = req.body;
+  const rpc = anvilProcess ? `http://127.0.0.1:${anvilPort}` : BSC_RPC;
+  try {
+    const argsStr = (callArgs || []).join(' ');
+    const cmd = `"${CAST_PATH}" call ${address} "${functionSig}" ${argsStr} --rpc-url ${rpc}`;
+    const output = execSync(cmd, { timeout: 15000, encoding: 'utf-8' });
+    return res.json({ ok: true, result: output.trim() });
+  } catch (err) {
+    return res.json({ ok: false, error: (err.stdout || err.stderr || err.message).substring(0, 500) });
+  }
+});
+
+// Run exploit script op Anvil fork
+app.post('/api/foundry/run-exploit', (req, res) => {
+  if (!authDash(req, res)) return;
+  if (!anvilProcess) return res.status(400).json({ error: 'Start eerst een Anvil fork' });
+
+  const { code, address } = req.body;
+  if (!code) return res.status(400).json({ error: 'Code vereist' });
+
+  const exploitFile = path.join(FOUNDRY_TMP, `exploit_${Date.now()}.js`);
+  try {
+    // Wrap de code zodat het standalone draait met ethers
+    const wrappedCode = `
+const { ethers } = require('ethers');
+const provider = new ethers.JsonRpcProvider('http://127.0.0.1:${anvilPort}');
+const TARGET = '${address || anvilTarget || ''}';
+
+async function main() {
+  // Impersonate helper
+  async function impersonate(addr) {
+    await provider.send('anvil_impersonateAccount', [addr]);
+    return new ethers.Wallet('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', provider);
+  }
+  async function setBalance(addr, amount) {
+    await provider.send('anvil_setBalance', [addr, ethers.toQuantity(ethers.parseEther(amount))]);
+  }
+  async function fund(addr) {
+    await setBalance(addr, '1000');
+  }
+
+${code}
+}
+
+main().then(() => { console.log('\\n=== EXPLOIT KLAAR ==='); process.exit(0); }).catch(e => { console.error('EXPLOIT FOUT:', e.message); process.exit(1); });
+`;
+    fs.writeFileSync(exploitFile, wrappedCode);
+
+    const output = execSync(`node "${exploitFile}"`, {
+      timeout: 120000,
+      encoding: 'utf-8',
+      env: { ...process.env, PATH: process.env.PATH + ';C:/Users/moham/.foundry/bin' }
+    });
+
+    // Cleanup
+    try { fs.unlinkSync(exploitFile); } catch(e) {}
+
+    return res.json({ ok: true, output: output.substring(0, 5000) });
+  } catch (err) {
+    try { fs.unlinkSync(exploitFile); } catch(e) {}
+    const output = (err.stdout || '') + '\n' + (err.stderr || '');
+    return res.json({ ok: false, output: output.substring(0, 5000), error: err.message });
+  }
+});
+
+// AI exploit generatie
+app.post('/api/foundry/ai-exploit', async (req, res) => {
+  if (!authDash(req, res)) return;
+  if (!CLAUDE_API_KEY) return res.status(400).json({ error: 'Geen Claude API key geconfigureerd' });
+
+  const { address, source, abi } = req.body;
+  if (!source) return res.status(400).json({ error: 'Contract source vereist' });
+
+  try {
+    const axios = require('axios');
+    const trimmedSource = source.length > 30000 ? source.substring(0, 30000) + '\n// ... [TRUNCATED]' : source;
+
+    const prompt = `Je bent een elite smart contract security auditor (bug bounty hunter). Analyseer dit BSC contract en genereer een exploit script.
+
+Contract: ${address}
+Chain: BSC (chainId 56)
+
+\`\`\`solidity
+${trimmedSource}
+\`\`\`
+
+Zoek naar BUSINESS LOGIC BUGS:
+1. Rekenfouten, afrondingsbugs, fee exploits
+2. Flash loan aanvallen (spot price als oracle)
+3. Dubbel claimen, timing exploits, verkeerde bookkeeping
+4. Cross-function state inconsistencies
+5. Eerste depositor / donation attacks
+6. Access control gaps (subtiel, niet simpel "missing onlyOwner")
+
+Genereer een exploit in PUUR JavaScript (ethers.js v6). Het script krijgt automatisch:
+- \`provider\` (JsonRpcProvider op Anvil fork)
+- \`TARGET\` (contract adres)
+- \`impersonate(addr)\` functie
+- \`setBalance(addr, amount)\` functie
+- \`fund(addr)\` functie
+
+Antwoord in JSON:
+{
+  "analysis": "korte uitleg van gevonden bugs (max 5 bullets)",
+  "exploitable": true/false,
+  "confidence": "HIGH/MEDIUM/LOW",
+  "exploit_code": "// alleen de body van main(), GEEN imports/wrapping"
+}
+
+Alleen echte bugs. Als niks gevonden: {"analysis":"Geen exploiteerbare bugs gevonden","exploitable":false,"confidence":"HIGH","exploit_code":null}`;
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6-20250514',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      timeout: 60000
+    });
+
+    const aiText = response.data.content[0].text;
+    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.json({ ok: false, error: 'Geen JSON in AI response' });
+
+    const result = JSON.parse(jsonMatch[0]);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // === HEALTH CHECK ===
 app.get('/health', (req, res) => res.json({ status: 'ok', results: scannerResults.length, exploits: exploitResults.length }));
 
@@ -262,6 +495,7 @@ app.get('/', (req, res) => {
   <div class="tab" onclick="switchTab('mythril')">Mythril</div>
   <div class="tab" onclick="switchTab('echidna')">Echidna</div>
   <div class="tab" onclick="switchTab('exploits')">Exploit Tests</div>
+  <div class="tab" onclick="switchTab('foundry')" style="color:#f0b429">⚡ Foundry Lab</div>
 </div>
 
 <div class="panel active" id="panel-contracts">
@@ -391,6 +625,65 @@ app.get('/', (req, res) => {
         <tr><td colspan="7" class="empty">Geen echidna resultaten</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<div class="panel" id="panel-foundry">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Anvil Status</div><div class="value" id="fl-status" style="color:#f85149">OFFLINE</div></div>
+    <div class="stat-card"><div class="label">Target</div><div class="value blue" id="fl-target" style="font-size:14px">-</div></div>
+    <div class="stat-card"><div class="label">RPC</div><div class="value" id="fl-rpc" style="font-size:14px;color:#8b949e">-</div></div>
+  </div>
+
+  <div style="padding:16px 24px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+    <div style="flex:1;min-width:300px">
+      <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">Contract Adres</label>
+      <input id="fl-address" type="text" placeholder="0x..." style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:10px 14px;border-radius:8px;font-family:monospace;font-size:14px;margin-top:4px">
+    </div>
+    <button onclick="startFork()" style="background:#1f6feb;color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;white-space:nowrap">Start Fork</button>
+    <button onclick="stopFork()" style="background:#21262d;color:#f85149;border:1px solid #f8514944;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">Stop</button>
+    <button onclick="loadContract()" style="background:#21262d;color:#58a6ff;border:1px solid #58a6ff44;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">Laad Source</button>
+    <button onclick="aiExploit()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">AI Exploit</button>
+  </div>
+
+  <div style="padding:0 24px 8px;display:flex;gap:16px">
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">Exploit Code (JavaScript / ethers v6)</label>
+        <button onclick="runExploit()" style="background:#3fb950;color:#0a0e17;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px">▶ RUN</button>
+      </div>
+      <textarea id="fl-code" spellcheck="false" style="width:100%;height:400px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:12px;border-radius:8px;font-family:'Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;tab-size:2">// Beschikbaar: provider, TARGET, impersonate(addr), setBalance(addr, eth), fund(addr)
+// Voorbeeld:
+
+const abi = ['function owner() view returns (address)', 'function balanceOf(address) view returns (uint256)'];
+const contract = new ethers.Contract(TARGET, abi, provider);
+
+const owner = await contract.owner();
+console.log('Owner:', owner);
+
+// Impersonate de owner
+await impersonate(owner);
+await fund(owner);
+const signer = await provider.getSigner(owner);
+
+// Doe iets als owner...
+console.log('Geimpersoneerd als owner');</textarea>
+    </div>
+  </div>
+
+  <div style="padding:0 24px 8px">
+    <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">AI Analyse</label>
+    <div id="fl-analysis" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:13px;color:#8b949e;min-height:60px;margin-top:4px;white-space:pre-wrap">Nog geen analyse uitgevoerd</div>
+  </div>
+
+  <div style="padding:0 24px 24px">
+    <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">Output</label>
+    <pre id="fl-output" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-family:'Courier New',monospace;font-size:12px;color:#3fb950;min-height:150px;max-height:400px;overflow-y:auto;margin-top:4px;white-space:pre-wrap">Wacht op exploit run...</pre>
+  </div>
+
+  <div style="padding:0 24px 16px">
+    <label style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px">Contract Source</label>
+    <pre id="fl-source" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-family:'Courier New',monospace;font-size:11px;color:#8b949e;max-height:300px;overflow-y:auto;margin-top:4px;white-space:pre-wrap">Klik 'Laad Source' om contract code te laden</pre>
   </div>
 </div>
 
@@ -721,6 +1014,132 @@ function closeModal() {
   document.getElementById('modal-overlay').classList.remove('active');
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// === FOUNDRY LAB FUNCTIONS ===
+async function checkAnvilStatus() {
+  try {
+    const r = await fetch('/api/foundry/status?key=' + KEY);
+    const s = await r.json();
+    document.getElementById('fl-status').textContent = s.running ? 'ONLINE' : 'OFFLINE';
+    document.getElementById('fl-status').style.color = s.running ? '#3fb950' : '#f85149';
+    document.getElementById('fl-target').textContent = s.address ? shortAddr(s.address) : '-';
+    document.getElementById('fl-rpc').textContent = s.running ? 'http://127.0.0.1:' + s.port : '-';
+  } catch(e) {}
+}
+
+async function startFork() {
+  const addr = document.getElementById('fl-address').value.trim();
+  if (!addr) return alert('Vul een contract adres in');
+  document.getElementById('fl-status').textContent = 'STARTING...';
+  document.getElementById('fl-status').style.color = '#f0b429';
+  document.getElementById('fl-output').textContent = 'Anvil fork starten...';
+  try {
+    const r = await fetch('/api/foundry/fork?key=' + KEY, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ address: addr })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('fl-output').textContent = 'Anvil fork gestart op ' + d.rpc + '\\nTarget: ' + d.address + '\\n\\nKlaar voor exploit testing!';
+      checkAnvilStatus();
+    } else {
+      document.getElementById('fl-output').textContent = 'FOUT: ' + (d.error || 'Onbekend');
+      document.getElementById('fl-status').textContent = 'FOUT';
+      document.getElementById('fl-status').style.color = '#f85149';
+    }
+  } catch(e) {
+    document.getElementById('fl-output').textContent = 'FOUT: ' + e.message;
+  }
+}
+
+async function stopFork() {
+  await fetch('/api/foundry/stop?key=' + KEY, { method: 'POST' });
+  document.getElementById('fl-output').textContent = 'Anvil fork gestopt.';
+  checkAnvilStatus();
+}
+
+async function loadContract() {
+  const addr = document.getElementById('fl-address').value.trim();
+  if (!addr) return alert('Vul een contract adres in');
+  document.getElementById('fl-source').textContent = 'Laden...';
+  try {
+    const r = await fetch('/api/foundry/contract/' + addr + '?key=' + KEY);
+    const d = await r.json();
+    if (d.source) {
+      document.getElementById('fl-source').textContent = '// ' + d.name + ' (Compiler: ' + d.compiler + ')\\n// Verified: ' + d.verified + '\\n\\n' + d.source.substring(0, 50000);
+    } else {
+      document.getElementById('fl-source').textContent = 'Geen verified source gevonden voor ' + addr;
+    }
+  } catch(e) {
+    document.getElementById('fl-source').textContent = 'FOUT: ' + e.message;
+  }
+}
+
+async function runExploit() {
+  const code = document.getElementById('fl-code').value;
+  const addr = document.getElementById('fl-address').value.trim();
+  if (!code.trim()) return alert('Schrijf eerst exploit code');
+
+  document.getElementById('fl-output').textContent = 'Exploit uitvoeren...';
+  document.getElementById('fl-output').style.color = '#f0b429';
+  try {
+    const r = await fetch('/api/foundry/run-exploit?key=' + KEY, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ code, address: addr })
+    });
+    const d = await r.json();
+    document.getElementById('fl-output').style.color = d.ok ? '#3fb950' : '#f85149';
+    document.getElementById('fl-output').textContent = d.output || d.error || 'Geen output';
+  } catch(e) {
+    document.getElementById('fl-output').style.color = '#f85149';
+    document.getElementById('fl-output').textContent = 'FOUT: ' + e.message;
+  }
+}
+
+async function aiExploit() {
+  const addr = document.getElementById('fl-address').value.trim();
+  const source = document.getElementById('fl-source').textContent;
+  if (!addr) return alert('Vul een contract adres in');
+  if (!source || source.includes('Klik') || source.includes('Laden')) return alert('Laad eerst de contract source');
+
+  document.getElementById('fl-analysis').textContent = 'AI analyseert contract...';
+  document.getElementById('fl-analysis').style.color = '#f0b429';
+  try {
+    const r = await fetch('/api/foundry/ai-exploit?key=' + KEY, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ address: addr, source })
+    });
+    const d = await r.json();
+    if (d.ok !== false) {
+      const conf = d.confidence === 'HIGH' ? '\\u{1f534}' : d.confidence === 'MEDIUM' ? '\\u{1f7e1}' : '\\u26aa';
+      document.getElementById('fl-analysis').style.color = d.exploitable ? '#f85149' : '#3fb950';
+      document.getElementById('fl-analysis').textContent = conf + ' Confidence: ' + (d.confidence || '?') + '\\nExploitable: ' + (d.exploitable ? 'JA' : 'NEE') + '\\n\\n' + (d.analysis || 'Geen findings');
+      if (d.exploit_code) {
+        document.getElementById('fl-code').value = d.exploit_code;
+      }
+    } else {
+      document.getElementById('fl-analysis').style.color = '#f85149';
+      document.getElementById('fl-analysis').textContent = 'FOUT: ' + (d.error || 'Onbekend');
+    }
+  } catch(e) {
+    document.getElementById('fl-analysis').style.color = '#f85149';
+    document.getElementById('fl-analysis').textContent = 'FOUT: ' + e.message;
+  }
+}
+
+// Tab support voor code editor
+document.getElementById('fl-code').addEventListener('keydown', function(e) {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = this.selectionStart;
+    this.value = this.value.substring(0, start) + '  ' + this.value.substring(this.selectionEnd);
+    this.selectionStart = this.selectionEnd = start + 2;
+  }
+});
+
+// Check anvil status periodiek
+setInterval(checkAnvilStatus, 10000);
+checkAnvilStatus();
 </script>
 
 <div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">

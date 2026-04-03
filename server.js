@@ -966,7 +966,7 @@ console.log('Geimpersoneerd als owner');</textarea>
       <div id="fl-analysis" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:13px;color:#8b949e;min-height:60px;margin-top:4px;white-space:pre-wrap">Nog geen analyse uitgevoerd</div>
     </div>
     <div style="flex:1">
-      <label style="font-size:11px;color:#f59e0b;text-transform:uppercase;letter-spacing:1px;font-weight:700">Pashov Audit (3 Agents)</label>
+      <label style="font-size:11px;color:#f59e0b;text-transform:uppercase;letter-spacing:1px;font-weight:700">Pashov Audit (8 Agents)</label>
       <div id="fl-pashov" style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:12px;color:#8b949e;min-height:60px;margin-top:4px;max-height:400px;overflow-y:auto">Klik 'Pashov Audit' om professionele security scan te starten</div>
     </div>
   </div>

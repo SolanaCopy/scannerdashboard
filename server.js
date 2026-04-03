@@ -581,40 +581,30 @@ app.post('/api/foundry/pashov-audit', async (req, res) => {
     let attackVectors = '';
     try { attackVectors = fs.readFileSync('C:/pashov-skills/solidity-auditor/references/attack-vectors/attack-vectors.md', 'utf8').substring(0, 8000); } catch(e) {}
 
-    const prompt = 'Je voert een security audit uit op een BSC smart contract met 3 gespecialiseerde agents. Antwoord VOLLEDIG in het Nederlands.\n\n' +
-      'Contract: ' + address + '\n\n' +
-      '```solidity\n' + trimmedSource + '\n```\n\n' +
-      '## AGENT 1: VECTOR SCAN\n' +
-      'Je bent een aanvaller die bekende attack vectors exploiteert. Controleer voor elke vector hieronder of deze van toepassing is op dit contract.\n' +
-      'Bekende vectors:\n' + attackVectors.substring(0, 4000) + '\n\n' +
-      '## AGENT 2: MATH PRECISION\n' +
-      'Je exploiteert integer rekenkunde: afrondingsfouten, precisieverlies, decimal mismatches, overflow, scale mixing.\n' +
-      'Breng alle fixed-point systemen in kaart. Vind verkeerde afrondingsrichting (stortingen naar beneden, opnames naar beneden, schuld naar boven, fees naar boven).\n' +
-      'Vind deling-voor-vermenigvuldiging ketens. Vind zero-round-to-steal patronen. Elke finding heeft concrete getallen nodig.\n\n' +
-      '## AGENT 3: ECONOMIC SECURITY\n' +
-      'Je exploiteert externe afhankelijkheden, waardestromen en economische prikkels. Je hebt onbeperkt kapitaal en flash loans.\n' +
-      'Breek afhankelijkheden, exploit token misbehavior (fee-on-transfer, rebasing, void-return).\n' +
-      'Bouw deposit→manipuleer→withdraw in enkele tx. Duw fee formules naar nul of max.\n\n' +
-      '## OUTPUT FORMAT\n' +
-      'Antwoord ALLEEN met een JSON object (geen tekst ervoor of erna, geen markdown):\n' +
-      '{"findings": [{"agent": "vector-scan|math-precision|economic-security", "type": "FINDING|LEAD", "severity": "HIGH|MEDIUM|LOW", "contract": "Name", "function": "func", "bug_class": "tag", "description": "beschrijving in Nederlands", "proof": "concrete waarden/trace", "fix": "suggestie in Nederlands"}], "summary": "2-3 zinnen samenvatting in Nederlands", "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE"}\n\n' +
-      'REGELS:\n' +
-      '- FINDINGs hebben concrete, onbeschermde, exploiteerbare aanvalspaden met bewijs\n' +
-      '- LEADs hebben echte code smells met gedeeltelijke paden\n' +
-      '- Rapporteer NIET: admin-only functies die admin dingen doen, standaard DeFi tradeoffs, self-harm-only bugs\n' +
-      '- Elke FINDING moet een proof veld hebben met concrete waarden\n' +
-      '- Wees grondig maar eerlijk — als het contract veilig is, zeg dat dan\n' +
-      '- BELANGRIJK: Begin je antwoord DIRECT met { — geen tekst, geen markdown, puur JSON';
+    const prompt = 'Je voert een professionele security audit uit op een BSC smart contract met 8 gespecialiseerde agents. Antwoord VOLLEDIG in het Nederlands.\n\n' +
+      'Contract: ' + address + '\n\n```solidity\n' + trimmedSource + '\n```\n\n' +
+      '## DE 8 AGENTS — voer ze ALLEMAAL uit:\n\n' +
+      '**1. VECTOR SCAN** — Exploit bekende attack vectors op dit contract:\n' + attackVectors.substring(0, 3000) + '\n\n' +
+      '**2. MATH PRECISION** — Exploit rekenkunde: afrondingsfouten, precisieverlies, decimal mismatches, overflow. Stortingen afronden OMLAAG, opnames OMLAAG, schuld OMHOOG, fees OMHOOG. Vind deling-voor-vermenigvuldiging, zero-round-to-steal, first-depositor aanvallen. Concrete getallen verplicht.\n\n' +
+      '**3. ACCESS CONTROL** — Breng permissiemodel in kaart (rollen, modifiers, guards). Vind inconsistente guards (functie A = onlyOwner, functie B schrijft zelfde variabele onbeschermd). Hijack initialize(). Escaleer privileges. Vind unprotected state changes.\n\n' +
+      '**4. ECONOMIC SECURITY** — Onbeperkt kapitaal + flash loans. Breek externe afhankelijkheden, exploit token misbehavior (fee-on-transfer, rebasing, void-return). Bouw deposit→manipuleer→withdraw in 1 tx. Duw fees naar 0 of max.\n\n' +
+      '**5. EXECUTION TRACE** — Volg uitvoeringsflow van entry tot state change. Vind parameter divergentie, value leaks (fee afgetrokken maar origineel bedrag doorgestuurd), encoding mismatches, stale reads, partial state updates.\n\n' +
+      '**6. INVARIANT** — Vind gebroken invarianten: conservation laws (sum balances = totalSupply), state couplings (X verandert maar Y niet), capacity constraints die omzeild worden.\n\n' +
+      '**7. PERIPHERY** — Audit libraries, helpers, utilities, base contracts. Vind ongevalideerde inputs, corrupte return values, verborgen state side effects die callers niet verwachten.\n\n' +
+      '**8. FIRST PRINCIPLES** — Vergeet bekende patronen. Lees de logica, identificeer ELKE impliciete aanname, en breek ze systematisch. Geen pattern matching — puur logisch redeneren.\n\n' +
+      '## OUTPUT — Begin DIRECT met { (geen tekst, geen markdown)\n' +
+      '{"findings": [{"agent": "vector-scan|math|access-control|economic|execution-trace|invariant|periphery|first-principles", "type": "FINDING|LEAD", "severity": "HIGH|MEDIUM|LOW", "contract": "Naam", "function": "functie", "bug_class": "tag", "description": "Nederlands", "proof": "concrete waarden", "fix": "suggestie"}], "summary": "samenvatting in Nederlands", "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE"}\n\n' +
+      'REGELS: FINDINGs = concrete exploiteerbare paden met bewijs. LEADs = code smells met gedeeltelijke paden. NIET rapporteren: admin-only functies, standaard DeFi tradeoffs, self-harm bugs. Begin DIRECT met {';
 
     console.log('[PASHOV] Audit gestart voor', address, '| source:', trimmedSource.length, 'chars');
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4000,
+      model: 'claude-opus-4-20250514',
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
     }, {
       headers: { 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      timeout: 90000
+      timeout: 180000
     });
 
     const aiText = response.data.content[0].text;

@@ -581,33 +581,30 @@ app.post('/api/foundry/pashov-audit', async (req, res) => {
     let attackVectors = '';
     try { attackVectors = fs.readFileSync('C:/pashov-skills/solidity-auditor/references/attack-vectors/attack-vectors.md', 'utf8').substring(0, 8000); } catch(e) {}
 
-    const prompt = 'You are running a parallelized smart contract security audit with 3 specialized agents. Analyze this BSC contract thoroughly.\n\n' +
+    const prompt = 'Je voert een security audit uit op een BSC smart contract met 3 gespecialiseerde agents. Antwoord VOLLEDIG in het Nederlands.\n\n' +
       'Contract: ' + address + '\n\n' +
       '```solidity\n' + trimmedSource + '\n```\n\n' +
       '## AGENT 1: VECTOR SCAN\n' +
-      'You are an attacker that exploits known attack vectors. For each vector below, check if it applies to this contract.\n' +
-      'Known vectors:\n' + attackVectors.substring(0, 4000) + '\n\n' +
+      'Je bent een aanvaller die bekende attack vectors exploiteert. Controleer voor elke vector hieronder of deze van toepassing is op dit contract.\n' +
+      'Bekende vectors:\n' + attackVectors.substring(0, 4000) + '\n\n' +
       '## AGENT 2: MATH PRECISION\n' +
-      'You exploit integer arithmetic: rounding errors, precision loss, decimal mismatches, overflow, scale mixing.\n' +
-      'Map all fixed-point systems. Find wrong rounding direction (deposits round DOWN, withdrawals round DOWN, debt UP, fees UP).\n' +
-      'Find division-before-multiplication chains. Find zero-round-to-steal patterns. Every finding needs concrete numbers.\n\n' +
+      'Je exploiteert integer rekenkunde: afrondingsfouten, precisieverlies, decimal mismatches, overflow, scale mixing.\n' +
+      'Breng alle fixed-point systemen in kaart. Vind verkeerde afrondingsrichting (stortingen naar beneden, opnames naar beneden, schuld naar boven, fees naar boven).\n' +
+      'Vind deling-voor-vermenigvuldiging ketens. Vind zero-round-to-steal patronen. Elke finding heeft concrete getallen nodig.\n\n' +
       '## AGENT 3: ECONOMIC SECURITY\n' +
-      'You exploit external dependencies, value flows, and economic incentives. You have unlimited capital and flash loans.\n' +
-      'Break dependencies, exploit token misbehavior (fee-on-transfer, rebasing, void-return).\n' +
-      'Construct deposit→manipulate→withdraw in single tx. Push fee formulas to zero or max.\n\n' +
+      'Je exploiteert externe afhankelijkheden, waardestromen en economische prikkels. Je hebt onbeperkt kapitaal en flash loans.\n' +
+      'Breek afhankelijkheden, exploit token misbehavior (fee-on-transfer, rebasing, void-return).\n' +
+      'Bouw deposit→manipuleer→withdraw in enkele tx. Duw fee formules naar nul of max.\n\n' +
       '## OUTPUT FORMAT\n' +
-      'Return a JSON object with this structure:\n' +
-      '{\n' +
-      '  "findings": [{"agent": "vector-scan|math-precision|economic-security", "type": "FINDING|LEAD", "severity": "HIGH|MEDIUM|LOW", "contract": "Name", "function": "func", "bug_class": "tag", "description": "one sentence", "proof": "concrete values/trace", "fix": "suggestion"}],\n' +
-      '  "summary": "2-3 sentence overall assessment",\n' +
-      '  "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE"\n' +
-      '}\n\n' +
-      'RULES:\n' +
-      '- FINDINGs have concrete, unguarded, exploitable attack paths with proof\n' +
-      '- LEADs have real code smells with partial paths\n' +
-      '- Do NOT report: admin-only functions doing admin things, standard DeFi tradeoffs, self-harm-only bugs\n' +
-      '- Every FINDING must have a proof field with concrete values\n' +
-      '- Be thorough but honest — if the contract is secure, say so';
+      'Antwoord ALLEEN met een JSON object (geen tekst ervoor of erna, geen markdown):\n' +
+      '{"findings": [{"agent": "vector-scan|math-precision|economic-security", "type": "FINDING|LEAD", "severity": "HIGH|MEDIUM|LOW", "contract": "Name", "function": "func", "bug_class": "tag", "description": "beschrijving in Nederlands", "proof": "concrete waarden/trace", "fix": "suggestie in Nederlands"}], "summary": "2-3 zinnen samenvatting in Nederlands", "risk_level": "CRITICAL|HIGH|MEDIUM|LOW|SAFE"}\n\n' +
+      'REGELS:\n' +
+      '- FINDINGs hebben concrete, onbeschermde, exploiteerbare aanvalspaden met bewijs\n' +
+      '- LEADs hebben echte code smells met gedeeltelijke paden\n' +
+      '- Rapporteer NIET: admin-only functies die admin dingen doen, standaard DeFi tradeoffs, self-harm-only bugs\n' +
+      '- Elke FINDING moet een proof veld hebben met concrete waarden\n' +
+      '- Wees grondig maar eerlijk — als het contract veilig is, zeg dat dan\n' +
+      '- BELANGRIJK: Begin je antwoord DIRECT met { — geen tekst, geen markdown, puur JSON';
 
     console.log('[PASHOV] Audit gestart voor', address, '| source:', trimmedSource.length, 'chars');
 

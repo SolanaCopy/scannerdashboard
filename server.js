@@ -1273,7 +1273,7 @@ function renderAI() {
   }
 
   tbody.innerHTML = filtered.map(a => {
-    const typeLabel = a.businessLogic ? '<span style="color:#bc8cff">Business Logic</span>' : '<span style="color:#58a6ff">AI Analyse</span>';
+    const typeLabel = a.type === 'pashov' ? '<span style="color:#f59e0b">Pashov 8-Agent</span>' : a.businessLogic ? '<span style="color:#bc8cff">Business Logic</span>' : '<span style="color:#58a6ff">AI Analyse</span>';
     const conf = a.businessLogic?.confidence || a.confidence || '-';
     const confColor = conf === 'HIGH' ? '#f85149' : conf === 'MEDIUM' ? '#f0b429' : '#8b949e';
     const findingCount = (a.findings || []).length + (a.businessLogic?.findings || []).length;
@@ -1327,8 +1327,26 @@ function showAiDetail(addr) {
     html += '</div>';
   }
 
+  // Pashov findings
+  if (a.pashov?.findings?.length > 0) {
+    html += '<div style="margin-bottom:16px"><div style="font-size:11px;color:#f59e0b;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">Pashov 8-Agent Audit — Risk: ' + (a.pashov.risk_level || '?') + '</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:8px">';
+    a.pashov.findings.forEach(f => {
+      const sevColor = f.severity === 'HIGH' ? '#f85149' : f.severity === 'MEDIUM' ? '#f0b429' : '#8b949e';
+      html += '<div style="background:#161b22;border-left:3px solid ' + sevColor + ';border-radius:4px;padding:10px 12px">';
+      html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><span style="color:' + sevColor + ';font-weight:700;font-size:11px">' + (f.severity || '?') + '</span><span style="color:#bc8cff;font-size:11px">[' + (f.agent || '?') + ']</span><span style="color:#c9d1d9;font-size:13px;font-weight:600">' + (f.bug_class || '') + '</span></div>';
+      html += '<div style="color:#c9d1d9;font-size:12px">' + (f.description || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+      if (f.proof) html += '<div style="color:#8b949e;font-size:11px;margin-top:4px;font-style:italic">Bewijs: ' + f.proof.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+      if (f.fix) html += '<div style="color:#3fb950;font-size:11px;margin-top:2px">Fix: ' + f.fix.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    if (a.pashov.summary) html += '<div style="color:#8b949e;font-size:12px;margin-top:8px;padding:8px;background:#161b22;border-radius:4px">' + a.pashov.summary.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+    html += '</div>';
+  }
+
   // Gewone findings
-  if (a.findings?.length > 0 && !a.businessLogic) {
+  if (a.findings?.length > 0 && !a.businessLogic && !a.pashov) {
     html += '<div><div style="font-size:11px;color:#f0b429;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">Findings</div>';
     html += '<ul style="color:#c9d1d9;font-size:13px;line-height:1.6;padding-left:20px">';
     a.findings.forEach(f => { html += '<li>' + f.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</li>'; });

@@ -15,6 +15,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const RESULTS_FILE = path.join(DATA_DIR, 'scan_results.json');
 const EXPLOITS_FILE = path.join(DATA_DIR, 'exploit_results.json');
 const ECHIDNA_FILE = path.join(DATA_DIR, 'echidna_results.json');
+const AI_RESULTS_FILE = path.join(DATA_DIR, 'ai_results.json');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -29,7 +30,8 @@ function saveJSON(file, data) {
 let scannerResults = loadJSON(RESULTS_FILE);
 let exploitResults = loadJSON(EXPLOITS_FILE);
 let echidnaResults = loadJSON(ECHIDNA_FILE);
-console.log(`[LOAD] ${scannerResults.length} resultaten, ${exploitResults.length} exploits, ${echidnaResults.length} echidna geladen van disk`);
+let aiResults = loadJSON(AI_RESULTS_FILE);
+console.log(`[LOAD] ${scannerResults.length} resultaten, ${exploitResults.length} exploits, ${echidnaResults.length} echidna, ${aiResults.length} ai geladen van disk`);
 
 // === AUTH ===
 function authDash(req, res) {
@@ -118,6 +120,28 @@ app.get('/api/scanner/exploit', (req, res) => {
 app.get('/api/scanner/echidna', (req, res) => {
   if (!authDash(req, res)) return;
   return res.json(echidnaResults);
+});
+
+// === API: Scanner pusht AI resultaten ===
+app.post('/api/scanner/ai-results', (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey !== SCANNER_API_KEY) return res.status(403).json({ error: 'Unauthorized' });
+
+  let body = req.body;
+  if (body.result) {
+    const idx = aiResults.findIndex(r => r.address?.toLowerCase() === body.result.address?.toLowerCase());
+    if (idx >= 0) aiResults[idx] = body.result;
+    else aiResults.unshift(body.result);
+    if (aiResults.length > 500) aiResults.pop();
+  }
+  saveJSON(AI_RESULTS_FILE, aiResults);
+  return res.json({ ok: true, count: aiResults.length });
+});
+
+// === API: Dashboard haalt AI resultaten ===
+app.get('/api/scanner/ai-results', (req, res) => {
+  if (!authDash(req, res)) return;
+  return res.json(aiResults);
 });
 
 // === API: Scanner status ===
@@ -779,6 +803,7 @@ app.get('/', (req, res) => {
   <div class="tab" onclick="switchTab('mythril')">Mythril</div>
   <div class="tab" onclick="switchTab('echidna')">Echidna</div>
   <div class="tab" onclick="switchTab('exploits')">Exploit Tests</div>
+  <div class="tab" onclick="switchTab('ai')" style="color:#bc8cff">🤖 AI Results</div>
   <div class="tab" onclick="switchTab('foundry')" style="color:#f0b429">⚡ Foundry Lab</div>
 </div>
 
@@ -912,6 +937,40 @@ app.get('/', (req, res) => {
   </div>
 </div>
 
+<div class="panel" id="panel-ai">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="label">Totaal Geanalyseerd</div><div class="value blue" id="ai-total">-</div></div>
+    <div class="stat-card"><div class="label">Kritieke Findings</div><div class="value red" id="ai-critical">-</div></div>
+    <div class="stat-card"><div class="label">Exploitable (BL)</div><div class="value purple" id="ai-exploitable">-</div></div>
+    <div class="stat-card"><div class="label">Schoon</div><div class="value green" id="ai-clean">-</div></div>
+  </div>
+  <div class="filters">
+    <button class="filter-btn active" onclick="setAiFilter('all')">Alle</button>
+    <button class="filter-btn" onclick="setAiFilter('critical')">Alleen Kritiek</button>
+    <button class="filter-btn" onclick="setAiFilter('exploitable')">Exploitable</button>
+    <button class="filter-btn" onclick="setAiFilter('bl')">Business Logic</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Datum</th>
+          <th>Contract</th>
+          <th>Adres</th>
+          <th>Balance</th>
+          <th>Type</th>
+          <th>Confidence</th>
+          <th>Findings</th>
+        </tr>
+      </thead>
+      <tbody id="ai-body">
+        <tr><td colspan="7" class="empty">Geen AI resultaten</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div id="ai-detail" style="padding:0 24px 24px"></div>
+</div>
+
 <div class="panel" id="panel-foundry">
   <div class="stats-bar">
     <div class="stat-card"><div class="label">Anvil Status</div><div class="value" id="fl-status" style="color:#f85149">OFFLINE</div></div>
@@ -970,6 +1029,8 @@ const KEY = '${key}';
 let data = [];
 let exploits = [];
 let echidnaData = [];
+let aiData = [];
+let aiFilter = 'all';
 let currentSort = 'totalHigh';
 let sortDir = -1;
 let currentFilter = 'all';
@@ -1181,21 +1242,121 @@ function renderEchidna() {
   }).join('');
 }
 
+function setAiFilter(f) {
+  aiFilter = f;
+  document.querySelectorAll('#panel-ai .filter-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  renderAI();
+}
+
+function renderAI() {
+  const total = aiData.length;
+  const critical = aiData.filter(a => a.hasCritical).length;
+  const exploitable = aiData.filter(a => a.businessLogic?.exploitable).length;
+  const clean = aiData.filter(a => !a.hasCritical && !a.businessLogic?.exploitable).length;
+
+  document.getElementById('ai-total').textContent = total;
+  document.getElementById('ai-critical').textContent = critical;
+  document.getElementById('ai-exploitable').textContent = exploitable;
+  document.getElementById('ai-clean').textContent = clean;
+
+  let filtered = [...aiData];
+  if (aiFilter === 'critical') filtered = filtered.filter(a => a.hasCritical);
+  else if (aiFilter === 'exploitable') filtered = filtered.filter(a => a.businessLogic?.exploitable);
+  else if (aiFilter === 'bl') filtered = filtered.filter(a => a.businessLogic);
+
+  const tbody = document.getElementById('ai-body');
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Geen AI resultaten' + (aiFilter !== 'all' ? ' (filter actief)' : '') + '</td></tr>';
+    document.getElementById('ai-detail').innerHTML = '';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(a => {
+    const typeLabel = a.businessLogic ? '<span style="color:#bc8cff">Business Logic</span>' : '<span style="color:#58a6ff">AI Analyse</span>';
+    const conf = a.businessLogic?.confidence || a.confidence || '-';
+    const confColor = conf === 'HIGH' ? '#f85149' : conf === 'MEDIUM' ? '#f0b429' : '#8b949e';
+    const findingCount = (a.findings || []).length + (a.businessLogic?.findings || []).length;
+    const badge = a.businessLogic?.exploitable ? '<span class="badge exploit">EXPLOITABLE</span>' :
+                  a.hasCritical ? '<span class="badge danger">KRITIEK</span>' :
+                  findingCount > 0 ? '<span class="badge warn">FINDINGS</span>' :
+                  '<span class="badge clean">SCHOON</span>';
+    return '<tr class="clickable" onclick="showAiDetail(\\''+a.address+'\\')">' +
+      '<td>' + fmtDate(a.time) + '</td>' +
+      '<td>' + (a.contractName || '-') + '</td>' +
+      '<td class="addr"><a href="https://bscscan.com/address/' + a.address + '" target="_blank" onclick="event.stopPropagation()">' + shortAddr(a.address) + '</a></td>' +
+      '<td class="balance">' + fmtBalance(a.balanceUsd) + '</td>' +
+      '<td>' + typeLabel + '</td>' +
+      '<td style="color:' + confColor + ';font-weight:600">' + conf + '</td>' +
+      '<td>' + badge + ' (' + findingCount + ')</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function showAiDetail(addr) {
+  const a = aiData.find(d => d.address === addr);
+  if (!a) return;
+  const det = document.getElementById('ai-detail');
+  let html = '<div style="background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:20px;margin-top:8px">';
+  html += '<h3 style="color:#c9d1d9;margin:0 0 12px">' + (a.contractName || shortAddr(a.address)) + ' <span style="color:#8b949e;font-size:12px">' + fmtBalance(a.balanceUsd) + '</span></h3>';
+
+  // AI Deep Analyse
+  if (a.aiText) {
+    html += '<div style="margin-bottom:16px"><div style="font-size:11px;color:#58a6ff;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">AI Deep Analyse (Sonnet 4.6)</div>';
+    html += '<div style="background:#161b22;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:13px;color:#c9d1d9;white-space:pre-wrap;line-height:1.6">' + a.aiText.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>';
+  }
+
+  // Business Logic
+  if (a.businessLogic) {
+    const bl = a.businessLogic;
+    const confColor = bl.confidence === 'HIGH' ? '#f85149' : bl.confidence === 'MEDIUM' ? '#f0b429' : '#8b949e';
+    html += '<div style="margin-bottom:16px"><div style="font-size:11px;color:#bc8cff;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">Business Logic Audit</div>';
+    html += '<div style="display:flex;gap:16px;margin-bottom:8px">';
+    html += '<span style="color:' + confColor + ';font-weight:700">Confidence: ' + (bl.confidence || '-') + '</span>';
+    html += '<span style="color:' + (bl.exploitable ? '#f85149' : '#3fb950') + ';font-weight:700">' + (bl.exploitable ? 'EXPLOITABLE' : 'Niet exploitable') + '</span>';
+    if (bl.exploitConfirmed) html += '<span style="color:#f85149;font-weight:700">✓ EXPLOIT BEVESTIGD</span>';
+    html += '</div>';
+    if (bl.findings?.length > 0) {
+      html += '<ul style="color:#c9d1d9;font-size:13px;line-height:1.6;padding-left:20px">';
+      bl.findings.forEach(f => { html += '<li>' + f.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</li>'; });
+      html += '</ul>';
+    }
+    if (bl.exploit_description) {
+      html += '<div style="background:#1c1212;border:1px solid #f8514933;border-radius:8px;padding:10px;font-size:12px;color:#f0b429;margin-top:8px"><strong>Exploit:</strong> ' + bl.exploit_description.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Gewone findings
+  if (a.findings?.length > 0 && !a.businessLogic) {
+    html += '<div><div style="font-size:11px;color:#f0b429;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:700">Findings</div>';
+    html += '<ul style="color:#c9d1d9;font-size:13px;line-height:1.6;padding-left:20px">';
+    a.findings.forEach(f => { html += '<li>' + f.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</li>'; });
+    html += '</ul></div>';
+  }
+
+  html += '</div>';
+  det.innerHTML = html;
+}
+
 async function fetchData() {
   try {
-    const [resR, resE, resF] = await Promise.all([
+    const [resR, resE, resF, resAI] = await Promise.all([
       fetch('/api/scanner/results?key=' + KEY),
       fetch('/api/scanner/exploit?key=' + KEY),
-      fetch('/api/scanner/echidna?key=' + KEY)
+      fetch('/api/scanner/echidna?key=' + KEY),
+      fetch('/api/scanner/ai-results?key=' + KEY)
     ]);
     data = await resR.json();
     exploits = await resE.json();
     echidnaData = await resF.json();
+    aiData = await resAI.json();
     render();
     renderSlither();
     renderMythril();
     renderExploits();
     renderEchidna();
+    renderAI();
     document.getElementById('last-update').textContent = 'Laatste update: ' + new Date().toLocaleTimeString('nl-NL');
   } catch (e) {
     document.getElementById('last-update').textContent = 'Fout bij laden';

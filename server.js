@@ -1450,7 +1450,7 @@ function showDetail(addr) {
   html += '</div>';
 
   // Echidna
-  html += '<div class="modal-section"><h3>Echidna (Fuzzing)</h3>';
+  html += '<div class="modal-section"><h3>🦔 Echidna (Fuzzing)</h3>';
   if (r.echidna?.success !== undefined && r.echidna?.passed !== undefined) {
     html += '<div style="font-size:12px;margin-bottom:6px">Passed: <span style="color:#3fb950;font-weight:600">' + (r.echidna.passed || 0) + '</span> | Failed: <span style="color:#f85149;font-weight:600">' + (r.echidna.failed || 0) + '</span></div>';
     if (r.echidna.issues?.length > 0) {
@@ -1460,6 +1460,71 @@ function showDetail(addr) {
     }
   } else {
     html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  // Foundry
+  html += '<div class="modal-section"><h3>⚡ Foundry (On-Chain)</h3>';
+  if (r.foundry) {
+    html += '<div style="font-size:12px;color:#c9d1d9;white-space:pre-wrap;background:#0d1117;padding:8px;border-radius:6px;border:1px solid #21262d">' + (typeof r.foundry === 'string' ? r.foundry : JSON.stringify(r.foundry, null, 2)).substring(0, 500) + '</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet beschikbaar</div>';
+  }
+  html += '</div>';
+
+  // Pashov
+  html += '<div class="modal-section"><h3>🏛️ Pashov 8-Agent Audit</h3>';
+  if (r.pashov && r.pashov.findings) {
+    const pHigh = r.pashov.findings.filter(f => f.severity === 'HIGH').length;
+    const pMed = r.pashov.findings.filter(f => f.severity === 'MEDIUM').length;
+    html += '<div style="font-size:12px;margin-bottom:8px">Risk: <span style="font-weight:700;color:' + (r.pashov.risk_level === 'CRITICAL' || r.pashov.risk_level === 'HIGH' ? '#f85149' : r.pashov.risk_level === 'MEDIUM' ? '#f0b429' : '#3fb950') + '">' + (r.pashov.risk_level || '?') + '</span> | 🔴 ' + pHigh + ' HIGH | 🟡 ' + pMed + ' MEDIUM</div>';
+    if (r.pashov.findings.length > 0) {
+      r.pashov.findings.forEach(f => {
+        const color = f.severity === 'HIGH' ? '#f85149' : f.severity === 'MEDIUM' ? '#f0b429' : '#8b949e';
+        const anvil = f.anvilResult === 'PROVEN' ? ' ⚡✅' : f.anvilResult === 'REJECTED' ? ' ⚡❌' : '';
+        html += '<div class="finding-row"><div class="f-sev"><span style="color:' + color + '">' + (f.severity || '?')[0] + '</span></div><div class="f-name">[' + (f.agent || '?') + '] ' + (f.name || f.function || '-') + anvil + '</div><div class="f-desc">' + (f.description || '').substring(0, 300) + '</div></div>';
+        if (f.proof) html += '<div style="font-size:11px;color:#8b949e;padding:2px 0 6px 28px;font-family:monospace">📋 ' + f.proof.substring(0, 200) + '</div>';
+      });
+    } else {
+      html += '<div class="no-findings">Geen findings — contract is veilig</div>';
+    }
+    if (r.pashov.summary) html += '<div style="font-size:12px;color:#c9d1d9;margin-top:8px;padding:8px;background:#0d1117;border-radius:6px;border:1px solid #21262d">📝 ' + r.pashov.summary + '</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">' + (r.pashov === null ? 'Niet getriggerd (geen HIGH findings)' : 'Niet beschikbaar') + '</div>';
+  }
+  html += '</div>';
+
+  // Exploit Test
+  html += '<div class="modal-section"><h3>🔬 Exploit Test (Anvil Fork)</h3>';
+  if (r.exploitTest?.tested) {
+    if (r.exploitTest.hits?.length > 0) {
+      r.exploitTest.hits.forEach(h => {
+        html += '<div class="finding-row"><div class="f-sev"><span style="color:#f85149">!</span></div><div class="f-name">HIT</div><div class="f-desc">' + h + '</div></div>';
+      });
+    }
+    if (r.exploitTest.safes?.length > 0) {
+      r.exploitTest.safes.forEach(s => {
+        html += '<div class="finding-row"><div class="f-sev"><span style="color:#3fb950">✓</span></div><div class="f-name">SAFE</div><div class="f-desc">' + s + '</div></div>';
+      });
+    }
+    if (r.exploitTest.error) html += '<div style="color:#f0b429;font-size:12px">Error: ' + r.exploitTest.error.substring(0, 200) + '</div>';
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet getriggerd (geen kritieke findings)</div>';
+  }
+  html += '</div>';
+
+  // Business Logic
+  html += '<div class="modal-section"><h3>🧠 Business Logic Audit</h3>';
+  if (r.businessLogic) {
+    const confirmed = r.businessLogic.exploitConfirmed;
+    html += '<div style="font-size:12px;margin-bottom:6px">Exploit bevestigd: <span style="color:' + (confirmed ? '#f85149' : '#3fb950') + ';font-weight:700">' + (confirmed ? 'JA' : 'NEE') + '</span></div>';
+    if (r.businessLogic.findings?.length > 0) {
+      r.businessLogic.findings.forEach(f => {
+        html += '<div class="finding-row"><div class="f-sev"><span style="color:#f0b429">!</span></div><div class="f-name">Logic Bug</div><div class="f-desc">' + (typeof f === 'string' ? f : (f.description || JSON.stringify(f))).substring(0, 300) + '</div></div>';
+      });
+    }
+  } else {
+    html += '<div style="color:#8b949e;font-size:12px">Niet getriggerd (geen Pashov findings)</div>';
   }
   html += '</div>';
 

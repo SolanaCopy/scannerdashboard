@@ -3,6 +3,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
+const TOOLS = require('./tools-config.js');
 const app = express();
 const PORT = process.env.PORT || 3099;
 const SCANNER_API_KEY = process.env.SCANNER_API_KEY || 'bsc-scanner-2026-secret';
@@ -167,11 +168,12 @@ app.delete('/api/scanner/results/:address', (req, res) => {
 });
 
 // === FOUNDRY LAB ===
-const ANVIL_PATH = 'C:/Users/moham/.foundry/bin/anvil.exe';
-const FORGE_PATH = 'C:/Users/moham/.foundry/bin/forge.exe';
-const CAST_PATH = 'C:/Users/moham/.foundry/bin/cast.exe';
-const BSC_RPC = 'https://bsc-dataseed1.binance.org';
-const BSCSCAN_KEY = process.env.BSCSCAN_API_KEY || 'P3RD5KVMAP39CB25HM97THVDXHVDCNEUIX';
+const ANVIL_PATH = TOOLS.ANVIL;
+const FORGE_PATH = TOOLS.FORGE;
+const CAST_PATH = TOOLS.CAST;
+const BSC_RPC = process.env.BSC_RPC || 'https://bsc-dataseed1.binance.org';
+const BSCSCAN_KEY = process.env.BSCSCAN_API_KEY || '';
+if (!BSCSCAN_KEY) console.warn('[WAARSCHUWING] BSCSCAN_API_KEY niet gezet — contract-source/ABI ophalen werkt niet. Zet hem in .env.');
 const CLAUDE_API_KEY = process.env.CLAUDE_KEY || process.env.CLAUDE_API_KEY || '';
 let anvilProcess = null;
 let anvilPort = 8545;
@@ -379,7 +381,7 @@ main().then(() => { console.log('\\n=== EXPLOIT KLAAR ==='); process.exit(0); })
     const output = execSync(`node "${exploitFile}"`, {
       timeout: 120000,
       encoding: 'utf-8',
-      env: { ...process.env, PATH: process.env.PATH + ';C:/Users/moham/.foundry/bin' }
+      env: TOOLS.augmentPath(process.env)
     });
 
     // Cleanup
@@ -544,7 +546,7 @@ app.post('/api/foundry/ai-exploit', async (req, res) => {
       'Als je GEEN manier vindt om als niet-eigenaar geld eruit te halen: {"analysis":"Geen exploit mogelijk als niet-eigenaar","exploitable":false,"confidence":"HIGH","exploit_code":null}';
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-20250514',
+      model: TOOLS.MODEL_SONNET,
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     }, {
@@ -599,7 +601,7 @@ app.post('/api/foundry/pashov-audit', async (req, res) => {
 
     // Lees attack vectors
     let attackVectors = '';
-    try { attackVectors = fs.readFileSync('C:/pashov-skills/solidity-auditor/references/attack-vectors/attack-vectors.md', 'utf8').substring(0, 8000); } catch(e) {}
+    try { attackVectors = fs.readFileSync(TOOLS.ATTACK_VECTORS_FILE, 'utf8').substring(0, 8000); } catch(e) {}
 
     const prompt = 'Je voert een professionele security audit uit op een BSC smart contract met 8 gespecialiseerde agents. Antwoord VOLLEDIG in het Nederlands.\n\n' +
       'Contract: ' + address + '\n\n```solidity\n' + trimmedSource + '\n```\n\n' +
@@ -619,7 +621,7 @@ app.post('/api/foundry/pashov-audit', async (req, res) => {
     console.log('[PASHOV] Audit gestart voor', address, '| source:', trimmedSource.length, 'chars');
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-20250514',
+      model: TOOLS.MODEL_OPUS,
       max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
     }, {
